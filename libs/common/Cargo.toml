@@ -1,0 +1,25 @@
+[package]
+name = "common"
+version = "0.1.0"
+edition = "2024"
+description = "IndexMaker Common Library"
+
+[dependencies]
+alloy = { workspace = true }
+
+alloy-primitives = { workspace = true }
+alloy-sol-types = { workspace = true }
+
+
+# [dev-dependencies]
+# alloy-primitives = { workspace = true, features = ["sha3-keccak"] }
+
+[features]
+default = ["vec-u8"]
+debug = []
+vec-u128 = []
+vec-u8 = []
+amount-sqrt = []
+
+[lib]
+crate-type = ["lib", "cdylib"]
