@@ -99,13 +99,18 @@ impl BitgetWebSocket {
                 // Parse JSON message
                 match serde_json::from_str::<BitgetWsMessage>(&text) {
                     Ok(parsed) => {
-                        // Check if it's a subscription confirmation
+                        // Check if it's a subscription confirmation or other control message
                         if let Some(op) = &parsed.op {
-                            if op == "subscribe" {
-                                tracing::debug!("Subscription confirmed: {}", text);
-                                return Ok(None);
-                            }
+                            tracing::debug!("Control message (op={}): {}", op, text);
+                            return Ok(None); // Ignore control messages
                         }
+
+                        // If there's no action field, it's likely a control message - ignore it
+                        if parsed.action.is_none() {
+                            tracing::trace!("Message without action (control message): {}", text);
+                            return Ok(None);
+                        }
+
                         Ok(Some(parsed))
                     }
                     Err(e) => {
@@ -116,7 +121,6 @@ impl BitgetWebSocket {
             }
             Message::Ping(data) => {
                 tracing::trace!("Received WebSocket ping");
-                // Tungstenite handles pong automatically
                 Ok(None)
             }
             Message::Pong(_) => {
