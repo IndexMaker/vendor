@@ -12,6 +12,8 @@ members = [
     # Native Application Package
     # "apps/abacus-docs",
     # "apps/scenarios",
+    "bin/scenarios",
+
     "bin/vendor",
 
     "proc-macros/abacus-macros",

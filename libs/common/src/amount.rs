@@ -1,9 +1,7 @@
 use alloc::vec::Vec;
 
 use alloy_primitives::{ruint::UintTryTo, U128, U256};
-
-#[cfg(feature = "with-ethers")]
-use ethers::types::U256 as EthersU256;
+use serde::{Deserialize, Serialize};
 
 use crate::uint;
 
@@ -60,7 +58,7 @@ fn sqrt_u256(n: U256) -> Option<U256> {
     Some(current)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub struct Amount(pub u128);
 
 impl Amount {
@@ -187,17 +185,6 @@ impl Amount {
         convert_from_u128(Self::SCALE)
     }
 
-    #[cfg(feature = "with-ethers")]
-    #[inline]
-    pub fn try_from_u256_ethers(value: EthersU256) -> Option<Self> {
-        Some(Self(value.try_into().ok()?))
-    }
-
-    #[cfg(feature = "with-ethers")]
-    #[inline]
-    pub fn to_u256_ethers(&self) -> EthersU256 {
-        EthersU256::from(self.0)
-    }
 }
 
 #[cfg(any(not(feature = "stylus"), feature = "debug"))]

@@ -1,11 +1,15 @@
 [package]
-name = "vendor"
+name = "scenarios"
 version = "0.1.0"
 edition = "2024"
+description = "Some scenarios as example"
 
 [dependencies]
 alloy-primitives = { workspace = true }
 alloy-sol-types = { workspace = true }
+# alloy-provider = { workspace = true, features = ["hyper"]}
+# alloy-network = { workspace = true }
+# alloy-signer-local = { workspace = true }
 alloy = {workspace = true}
 clap = { workspace = true, features = ["derive"] }
 chrono = { workspace = true }
@@ -24,19 +28,6 @@ labels-macros = { workspace = true }
 serde = { workspace = true }
 vector-macros = { workspace = true }
 
-tokio-util = { version = "0.7", features = ["rt"] }
-
-# WebSocket
-tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
-futures-util = "0.3"
-
-# Serialization
-serde_json = "1.0"
-
-
-# Utilities
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-parking_lot = "0.12"
-crc32fast = "1.4"
-
+# [features]
+# default = ["debug"]
+# debug = ["common/debug", "common-ethers/debug", "abacus-formulas/debug"]

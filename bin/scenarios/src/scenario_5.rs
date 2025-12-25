@@ -1,10 +1,10 @@
-use alloy_primitives::{Address, uint, Bytes};
+use alloy_primitives::{Address, uint};
 use alloy_sol_types::SolCall;
 use amount_macros::amount;
 use common::interfaces::banker::IBanker;
 use common::interfaces::factor::IFactor;
 use common::interfaces::guildmaster::IGuildmaster;
-use common::{labels::Labels, log_msg, vector::Vector};
+use common::{labels::Labels, vector::Vector};
 use labels_macros::label_vec;
 use vector_macros::amount_vec;
 
@@ -37,7 +37,7 @@ where
             .to(castle_address)
             .input(call.abi_encode().into());
         
-        let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
+        let _receipt = provider.send_transaction(tx).await?.get_receipt().await?;
     }
 
     {
@@ -54,7 +54,7 @@ where
             .to(castle_address)
             .input(call.abi_encode().into());
         
-        let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
+        let _receipt = provider.send_transaction(tx).await?.get_receipt().await?;
     }
 
     {
@@ -73,7 +73,7 @@ where
             .to(castle_address)
             .input(call.abi_encode().into());
         
-        let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
+        let _receipt = provider.send_transaction(tx).await?.get_receipt().await?;
     }
 
     {
@@ -94,7 +94,7 @@ where
             .to(castle_address)
             .input(call.abi_encode().into());
         
-        let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
+        let _receipt = provider.send_transaction(tx).await?.get_receipt().await?;
     }
 
     {
@@ -115,7 +115,7 @@ where
             .to(castle_address)
             .input(call.abi_encode().into());
         
-        let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
+        let _receipt = provider.send_transaction(tx).await?.get_receipt().await?;
     }
 
     {
@@ -132,7 +132,7 @@ where
             .to(castle_address)
             .input(call.abi_encode().into());
         
-        let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
+        let _receipt = provider.send_transaction(tx).await?.get_receipt().await?;
     }
 
     {
@@ -155,7 +155,7 @@ where
             .to(castle_address)
             .input(call.abi_encode().into());
         
-        let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
+        let _receipt = provider.send_transaction(tx).await?.get_receipt().await?;
     }
 
     {
@@ -170,7 +170,7 @@ where
             .to(castle_address)
             .input(call.abi_encode().into());
         
-        let receipt = provider.send_transaction(tx).await?.get_receipt().await?;
+        let _receipt = provider.send_transaction(tx).await?.get_receipt().await?;
     }
 
     {
