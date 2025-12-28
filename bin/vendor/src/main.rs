@@ -20,8 +20,10 @@ mod basket;
 mod config;
 mod market_data;
 mod onchain;
+mod inventory;
 
 use basket::BasketManager;
+use inventory::InventoryManager;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -126,6 +128,24 @@ async fn main() -> Result<()> {
 
     // Create price tracker
     let price_tracker = Arc::new(PriceTracker::new());
+
+    // Create inventory manager (only if basket_manager exists)
+    let inventory = if let Some(ref bm) = basket_manager {
+        let inventory_path = PathBuf::from("./data/inventory_manager.json");
+        let inv = InventoryManager::load_from_storage(
+            bm.clone(),
+            price_tracker.clone(),
+            inventory_path,
+        )
+        .await?;
+
+        tracing::info!("{}", inv.summary());
+
+        Some(Arc::new(AtomicLock::new(inv)))
+    } else {
+        tracing::info!("No basket manager available, inventory manager disabled");
+        None
+    };
 
     // Subscribe to market data events
     {

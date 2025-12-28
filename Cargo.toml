@@ -42,7 +42,7 @@ alloy-sol-macro-expander = { version = "1.2", default-features = false }
 alloy-sol-macro-input = { version = "1.2", default-features = false }
 alloy-sol-types = "1.2"
 amount-macros = { path = "./proc-macros/amount-macros" }
-chrono = "0.4.42"
+chrono = { version = "0.4.42", features = ["serde"] }
 clap = "4.5"
 dotenv = "0.15.0"
 ethers = "2.0"
