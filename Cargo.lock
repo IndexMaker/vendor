@@ -3246,6 +3246,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "keeper"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "eyre",
+ "rand 0.9.2",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "labels-macros"
 version = "0.1.0"
 dependencies = [
