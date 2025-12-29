@@ -1,4 +1,6 @@
+use chrono::Utc;
 use clap::Parser;
+use common::amount::Amount;
 use config::VendorConfig;
 use eyre::Result;
 use market_data::{BitgetSubscriber, BitgetSubscriberConfig, MarketDataEvent, MarketDataObserver, Subscription};
@@ -21,9 +23,13 @@ mod config;
 mod market_data;
 mod onchain;
 mod inventory;
+mod api;
 
 use basket::BasketManager;
 use inventory::InventoryManager;
+use api::ApiServer;
+
+use crate::inventory::{Order, OrderSide};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -55,6 +61,10 @@ struct Cli {
     /// Log level (trace, debug, info, warn, error)
     #[arg(short, long, default_value = "info")]
     log_level: String,
+
+    /// API server port
+    #[arg(long, default_value = "8080")]
+    api_port: u16,
 }
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -144,6 +154,44 @@ async fn main() -> Result<()> {
         Some(Arc::new(AtomicLock::new(inv)))
     } else {
         tracing::info!("No basket manager available, inventory manager disabled");
+        None
+    };
+
+    // Create inventory manager (only if basket_manager exists)
+    let inventory = if let Some(ref bm) = basket_manager {
+        let inventory_path = PathBuf::from("./data/inventory_manager.json");
+        let inv = InventoryManager::load_from_storage(
+            bm.clone(),
+            price_tracker.clone(),
+            inventory_path,
+        )
+        .await?;
+
+        tracing::info!("{}", inv.summary());
+
+        Some(Arc::new(tokio::sync::RwLock::new(inv)))
+    } else {
+        tracing::info!("No basket manager available, inventory manager disabled");
+        None
+    };
+
+    // Start API server if inventory is available
+    let api_server = if let Some(ref inv) = inventory {
+        let api_addr = "0.0.0.0:8080".parse()?;
+        let server = ApiServer::new(inv.clone(), api_addr);
+        let cancel_token = server.cancel_token();
+
+        tokio::spawn(async move {
+            if let Err(e) = server.start().await {
+                tracing::error!("API server failed: {:?}", e);
+            }
+        });
+
+        tracing::info!("API server started on http://0.0.0.0:8080");
+
+        Some(cancel_token)
+    } else {
+        tracing::info!("API server disabled (no inventory manager)");
         None
     };
 
@@ -321,6 +369,10 @@ async fn main() -> Result<()> {
     bitget_subscriber.stop().await?;
     if let Some(submitter) = onchain_submitter {
         submitter.stop().await;
+    }
+
+    if let Some(api_cancel) = api_server {
+        api_cancel.cancel();
     }
 
     tracing::info!("Vendor stopped");
