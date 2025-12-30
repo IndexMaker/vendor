@@ -422,9 +422,38 @@ where
             .to(self.config.castle_address)
             .input(call.abi_encode().into());
 
-        let receipt = self.provider.send_transaction(tx).await?.get_receipt().await?;
-
-        tracing::info!("✓ Index '{}' submitted: {:?}", index.symbol, receipt.transaction_hash);
+        // Handle potential revert (index already exists)
+        match self.provider.send_transaction(tx).await {
+            Ok(pending_tx) => {
+                match pending_tx.get_receipt().await {
+                    Ok(receipt) => {
+                        tracing::info!("✓ Index '{}' submitted: {:?}", index.symbol, receipt.transaction_hash);
+                    }
+                    Err(e) => {
+                        // Check if it's a revert error (index already exists)
+                        let error_msg = format!("{:?}", e);
+                        if error_msg.contains("revert") || error_msg.contains("already") {
+                            tracing::info!("ℹ️  Index '{}' already exists on-chain, skipping", index.symbol);
+                            // Continue without error - this is expected behavior
+                        } else {
+                            tracing::error!("Failed to get receipt for index '{}': {:?}", index.symbol, e);
+                            return Err(e.into());
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                // Check if it's a revert error
+                let error_msg = format!("{:?}", e);
+                if error_msg.contains("revert") || error_msg.contains("already") {
+                    tracing::info!("ℹ️  Index '{}' already exists on-chain, skipping", index.symbol);
+                    // Continue without error
+                } else {
+                    tracing::error!("Failed to send transaction for index '{}': {:?}", index.symbol, e);
+                    return Err(e.into());
+                }
+            }
+        }
 
         // Submit vote
         let vote_call = IGuildmaster::submitVoteCall {
@@ -436,9 +465,32 @@ where
             .to(self.config.castle_address)
             .input(vote_call.abi_encode().into());
 
-        let vote_receipt = self.provider.send_transaction(vote_tx).await?.get_receipt().await?;
-
-        tracing::info!("✓ Vote for '{}' submitted: {:?}", index.symbol, vote_receipt.transaction_hash);
+        // Handle vote submission errors similarly
+        match self.provider.send_transaction(vote_tx).await {
+            Ok(pending_tx) => {
+                match pending_tx.get_receipt().await {
+                    Ok(receipt) => {
+                        tracing::info!("✓ Vote for '{}' submitted: {:?}", index.symbol, receipt.transaction_hash);
+                    }
+                    Err(e) => {
+                        let error_msg = format!("{:?}", e);
+                        if error_msg.contains("revert") || error_msg.contains("already") {
+                            tracing::debug!("Vote for '{}' may have already been submitted", index.symbol);
+                        } else {
+                            tracing::warn!("Failed to get receipt for vote on '{}': {:?}", index.symbol, e);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                let error_msg = format!("{:?}", e);
+                if error_msg.contains("revert") || error_msg.contains("already") {
+                    tracing::debug!("Vote for '{}' may have already been submitted", index.symbol);
+                } else {
+                    tracing::warn!("Failed to send vote transaction for '{}': {:?}", index.symbol, e);
+                }
+            }
+        }
 
         Ok(())
     }
