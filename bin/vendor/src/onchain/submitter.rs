@@ -107,7 +107,7 @@ where
     /// Sync new additions: Check for and submit only NEW assets/indices
     pub async fn sync_new_additions(&self) -> Result<()> {
         tracing::debug!("Checking for new assets/indices...");
-    
+
         // Get current state and release lock immediately
         let (current_asset_symbols, current_asset_ids, current_indices) = {
             let basket_manager = self.basket_manager.read();
@@ -117,10 +117,10 @@ where
                 .into_iter()
                 .map(|idx| idx.clone())
                 .collect::<Vec<_>>();
-            
+
             (current_asset_symbols, current_asset_ids, current_indices)
         }; // Lock released here
-    
+
         // Check for new assets
         let new_asset_ids: Vec<u128> = {
             let initialized = self.initialized_assets.read();
@@ -129,28 +129,28 @@ where
                 .filter(|id| !initialized.contains(id))
                 .collect()
         }; // Lock released here
-    
+
         if !new_asset_ids.is_empty() {
             tracing::info!("Found {} new asset(s) to submit: {:?}", new_asset_ids.len(), new_asset_ids);
-            
+
             // Get symbols for new IDs
             let new_symbols: Vec<String> = new_asset_ids
                 .iter()
                 .filter_map(|id| self.asset_mapper.get_symbol(*id).cloned())
                 .collect();
-            
+
             // Submit new assets (can await now)
             let submitted_ids = self.submit_assets_internal(&new_symbols).await?;
-            
+
             // Mark as initialized
             let mut initialized = self.initialized_assets.write();
             for id in submitted_ids {
                 initialized.insert(id);
             }
-            
+
             tracing::info!("✓ New assets submitted and initialized");
         }
-    
+
         // Check for new indices
         let new_indices: Vec<Index> = {
             let initialized = self.initialized_indices.read();
@@ -159,24 +159,24 @@ where
                 .filter(|index| !initialized.contains(&index.symbol))
                 .collect()
         }; // Lock released here
-    
+
         if !new_indices.is_empty() {
             tracing::info!("Found {} new index/indices to submit", new_indices.len());
-            
+
             for index in &new_indices {
                 self.submit_index_internal(index).await?;
-                
+
                 // Mark as initialized
                 self.initialized_indices.write().insert(index.symbol.clone());
             }
-            
+
             tracing::info!("✓ New indices submitted and initialized");
         }
-    
+
         if new_asset_ids.is_empty() && new_indices.is_empty() {
             tracing::debug!("No new assets or indices found");
         }
-    
+
         Ok(())
     }
 

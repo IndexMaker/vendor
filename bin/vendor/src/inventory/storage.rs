@@ -17,6 +17,13 @@ impl InventorySnapshot {
     }
 
     pub async fn save_to_file(&self, path: &Path) -> Result<()> {
+        // Create parent directory if it doesn't exist
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .context(format!("Failed to create directory {:?}", parent))?;
+        }
+
         let json = serde_json::to_string_pretty(self)
             .context("Failed to serialize inventory snapshot")?;
 

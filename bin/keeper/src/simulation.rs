@@ -108,9 +108,10 @@ impl OrderSimulator {
                         );
                     } else {
                         tracing::warn!(
-                            "⚠️  Order {} rejected: {}",
+                            "⚠️  Order {} failed: {} (status: {})",
                             response.order_id,
-                            response.message
+                            response.message,
+                            response.status
                         );
                     }
                 }

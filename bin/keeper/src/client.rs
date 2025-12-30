@@ -77,9 +77,9 @@ impl VendorClient {
     /// Submit an order to the vendor
     pub async fn submit_order(&self, request: CreateOrderRequest) -> Result<CreateOrderResponse> {
         let url = format!("{}/api/v1/orders", self.base_url);
-
+    
         tracing::debug!("Submitting order to {}: {:?}", url, request);
-
+    
         let response = self
             .client
             .post(&url)
@@ -87,25 +87,37 @@ impl VendorClient {
             .send()
             .await
             .context("Failed to send order request")?;
-
+    
         let status = response.status();
-        let response_text = response
-            .text()
-            .await
-            .context("Failed to read response body")?;
-
+        
         if !status.is_success() {
+            let response_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unable to read response".to_string());
+            
             tracing::error!("Order submission failed: {} - {}", status, response_text);
+            
+            // Try to parse as CreateOrderResponse to get better error message
+            if let Ok(order_response) = serde_json::from_str::<CreateOrderResponse>(&response_text) {
+                return Ok(order_response); // Return the error response instead of panicking
+            }
+            
             return Err(eyre::eyre!(
                 "Order submission failed with status {}: {}",
                 status,
                 response_text
             ));
         }
-
+    
+        let response_text = response
+            .text()
+            .await
+            .context("Failed to read response body")?;
+    
         let order_response: CreateOrderResponse = serde_json::from_str(&response_text)
             .context(format!("Failed to parse order response: {}", response_text))?;
-
+    
         Ok(order_response)
     }
 
