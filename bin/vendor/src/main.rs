@@ -151,24 +151,6 @@ async fn main() -> Result<()> {
 
         tracing::info!("{}", inv.summary());
 
-        Some(Arc::new(AtomicLock::new(inv)))
-    } else {
-        tracing::info!("No basket manager available, inventory manager disabled");
-        None
-    };
-
-    // Create inventory manager (only if basket_manager exists)
-    let inventory = if let Some(ref bm) = basket_manager {
-        let inventory_path = PathBuf::from("./data/inventory_manager.json");
-        let inv = InventoryManager::load_from_storage(
-            bm.clone(),
-            price_tracker.clone(),
-            inventory_path,
-        )
-        .await?;
-
-        tracing::info!("{}", inv.summary());
-
         Some(Arc::new(tokio::sync::RwLock::new(inv)))
     } else {
         tracing::info!("No basket manager available, inventory manager disabled");
@@ -177,18 +159,18 @@ async fn main() -> Result<()> {
 
     // Start API server if inventory is available
     let api_server = if let Some(ref inv) = inventory {
-        let api_addr = "0.0.0.0:8080".parse()?;
+        let api_addr = format!("0.0.0.0:{}", cli.api_port).parse()?;
         let server = ApiServer::new(inv.clone(), api_addr);
         let cancel_token = server.cancel_token();
-
+    
         tokio::spawn(async move {
             if let Err(e) = server.start().await {
                 tracing::error!("API server failed: {:?}", e);
             }
         });
-
-        tracing::info!("API server started on http://0.0.0.0:8080");
-
+    
+        tracing::info!("API server started on http://0.0.0.0:{}", cli.api_port);
+    
         Some(cancel_token)
     } else {
         tracing::info!("API server disabled (no inventory manager)");
