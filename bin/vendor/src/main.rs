@@ -24,6 +24,7 @@ mod market_data;
 mod onchain;
 mod inventory;
 mod api;
+mod order_sender;
 
 use basket::BasketManager;
 use inventory::InventoryManager;
@@ -162,15 +163,15 @@ async fn main() -> Result<()> {
         let api_addr = format!("0.0.0.0:{}", cli.api_port).parse()?;
         let server = ApiServer::new(inv.clone(), api_addr);
         let cancel_token = server.cancel_token();
-    
+
         tokio::spawn(async move {
             if let Err(e) = server.start().await {
                 tracing::error!("API server failed: {:?}", e);
             }
         });
-    
+
         tracing::info!("API server started on http://0.0.0.0:{}", cli.api_port);
-    
+
         Some(cancel_token)
     } else {
         tracing::info!("API server disabled (no inventory manager)");

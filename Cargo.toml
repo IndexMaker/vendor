@@ -45,6 +45,7 @@ alloy-sol-types = "1.2"
 amount-macros = { path = "./proc-macros/amount-macros" }
 chrono = { version = "0.4.42", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
+derive_builder = "0.20"
 dotenv = "0.15.0"
 ethers = "2.0"
 eyre = "0.6.8"
@@ -52,6 +53,7 @@ futures = "0.3"
 hex = { version = "0.4", default-features = false }
 itertools = { version = "0.14" }
 labels-macros = { path = "./proc-macros/labels-macros" }
+rand = { version = "0.9" }
 regex = "1.12"
 reqwest = { version = "0.12", default-features = false }
 ruint = "^1.12.3"
