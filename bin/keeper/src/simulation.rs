@@ -5,8 +5,8 @@ use std::time::Duration;
 
 pub struct SimulationConfig {
     pub indices: Vec<String>,
-    pub min_quantity: f64,
-    pub max_quantity: f64,
+    pub min_collateral_usd: f64,  // Renamed from min_quantity
+    pub max_collateral_usd: f64,  // Renamed from max_quantity
     pub min_interval_secs: u64,
     pub max_interval_secs: u64,
     pub client_id_prefix: String,
@@ -16,8 +16,8 @@ impl Default for SimulationConfig {
     fn default() -> Self {
         Self {
             indices: vec!["SY100".to_string()],
-            min_quantity: 1.0,
-            max_quantity: 50.0,
+            min_collateral_usd: 100.0,   // Changed
+            max_collateral_usd: 5000.0,  // Changed
             min_interval_secs: 10,
             max_interval_secs: 30,
             client_id_prefix: "keeper-sim".to_string(),
@@ -40,28 +40,25 @@ impl OrderSimulator {
         }
     }
 
-    /// Generate a random buy order
     fn generate_random_order(&mut self) -> CreateOrderRequest {
         let mut rng = rand::thread_rng();
 
-        // Random index
         let index_symbol = self.config.indices[rng.gen_range(0..self.config.indices.len())].clone();
 
-        // Random quantity
-        let quantity = rng.gen_range(self.config.min_quantity..=self.config.max_quantity);
-        let quantity_str = format!("{:.2}", quantity);
+        // Use renamed fields
+        let collateral = rng.gen_range(self.config.min_collateral_usd..=self.config.max_collateral_usd);
+        let collateral_str = format!("{:.2}", collateral);
 
-        // Client ID
         self.order_count += 1;
         let client_id = format!("{}-{:06}", self.config.client_id_prefix, self.order_count);
 
         CreateOrderRequest {
             side: OrderSide::Buy,
             index_symbol,
-            quantity: quantity_str,
+            collateral_usd: collateral_str,
             client_id,
         }
-    }
+    }   
 
     /// Calculate random interval
     fn random_interval(&self) -> Duration {
@@ -75,9 +72,9 @@ impl OrderSimulator {
         tracing::info!("Starting order simulation");
         tracing::info!("Indices: {:?}", self.config.indices);
         tracing::info!(
-            "Quantity range: {:.2} - {:.2}",
-            self.config.min_quantity,
-            self.config.max_quantity
+            "Collateral range: ${:.2} - ${:.2}",  // Changed
+            self.config.min_collateral_usd,
+            self.config.max_collateral_usd
         );
         tracing::info!(
             "Interval range: {}s - {}s",
@@ -90,10 +87,10 @@ impl OrderSimulator {
             let order = self.generate_random_order();
 
             tracing::info!(
-                "🎲 Generating order #{}: {} {} units of {}",
+                "🎲 Generating order #{}: {} ${} for {}",  // Changed log format
                 self.order_count,
                 order.side,
-                order.quantity,
+                order.collateral_usd,  // Changed from quantity
                 order.index_symbol
             );
 

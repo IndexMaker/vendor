@@ -19,13 +19,13 @@ struct Cli {
     #[arg(long, value_delimiter = ',')]
     indices: Option<Vec<String>>,
 
-    /// Minimum order quantity
-    #[arg(long, default_value = "1.0")]
-    min_quantity: f64,
+    /// Minimum collateral in USD
+    #[arg(long, default_value = "100.0")]
+    min_collateral: f64,
 
-    /// Maximum order quantity
-    #[arg(long, default_value = "50.0")]
-    max_quantity: f64,
+    /// Maximum collateral in USD
+    #[arg(long, default_value = "5000.0")]
+    max_collateral: f64,
 
     /// Minimum interval between orders (seconds)
     #[arg(long, default_value = "10")]
@@ -110,8 +110,8 @@ async fn main() -> Result<()> {
 
     let config = SimulationConfig {
         indices,
-        min_quantity: cli.min_quantity,
-        max_quantity: cli.max_quantity,
+        min_collateral_usd: cli.min_collateral,  // Changed
+        max_collateral_usd: cli.max_collateral,  // Changed
         min_interval_secs: cli.min_interval,
         max_interval_secs: cli.max_interval,
         client_id_prefix: cli.client_id_prefix,

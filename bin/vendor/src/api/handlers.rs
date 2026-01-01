@@ -30,17 +30,17 @@ pub async fn create_order(
     Json(request): Json<CreateOrderRequest>,
 ) -> (StatusCode, Json<CreateOrderResponse>) {
     tracing::info!(
-        "Received order request: {} {} of {}",
+        "Received order request: {} ${} for {}",  // Changed log
         request.side,
-        request.quantity,
+        request.collateral_usd,
         request.index_symbol
     );
 
-    // Validate and parse quantity
-    let quantity = match request.parse_quantity() {
-        Ok(qty) => qty,
+    // Validate and parse collateral (renamed)
+    let collateral = match request.parse_collateral() {
+        Ok(col) => col,
         Err(e) => {
-            tracing::warn!("Invalid quantity in request: {}", e);
+            tracing::warn!("Invalid collateral in request: {}", e);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(CreateOrderResponse::error("".to_string(), e)),
@@ -51,16 +51,16 @@ pub async fn create_order(
     // Generate order ID
     let order_id = format!("O-{}", Utc::now().timestamp_millis());
 
-    // Create order
+    // Create order (with collateral)
     let order = Order::new(
         order_id.clone(),
         request.side,
         request.index_symbol.clone(),
-        quantity,
+        collateral,  // Changed
         request.client_id.clone(),
     );
 
-    // Process order - tokio RwLock can be held across await
+    // Process order
     let result = {
         let mut inventory = state.inventory.write().await;
         match inventory.process_buy_order(order).await {

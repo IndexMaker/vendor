@@ -7,22 +7,22 @@ use serde::{Deserialize, Serialize};
 pub struct CreateOrderRequest {
     pub side: OrderSide,
     pub index_symbol: String,
-    pub quantity: String, // String to handle precise decimals from client
+    pub collateral_usd: String,  // Changed from quantity!
     pub client_id: String,
 }
 
 impl CreateOrderRequest {
-    pub fn parse_quantity(&self) -> Result<Amount, String> {
-        let qty_f64: f64 = self
-            .quantity
+    pub fn parse_collateral(&self) -> Result<Amount, String> {  // Renamed
+        let collateral_f64: f64 = self
+            .collateral_usd
             .parse()
-            .map_err(|e| format!("Invalid quantity: {}", e))?;
+            .map_err(|e| format!("Invalid collateral: {}", e))?;
 
-        if qty_f64 <= 0.0 {
-            return Err("Quantity must be positive".to_string());
+        if collateral_f64 <= 0.0 {
+            return Err("Collateral must be positive".to_string());
         }
 
-        Ok(Amount::from_u128_raw((qty_f64 * 1e18) as u128))
+        Ok(Amount::from_u128_raw((collateral_f64 * 1e18) as u128))
     }
 }
 

@@ -32,7 +32,7 @@ pub struct Order {
     pub order_id: String,
     pub side: OrderSide,
     pub index_symbol: String,
-    pub quantity: Amount,
+    pub collateral_usd: Amount,  // Changed from quantity!
     pub client_id: String,
     pub status: OrderStatus,
     pub created_at: DateTime<Utc>,
@@ -44,7 +44,7 @@ impl Order {
         order_id: String,
         side: OrderSide,
         index_symbol: String,
-        quantity: Amount,
+        collateral_usd: Amount,  // Changed
         client_id: String,
     ) -> Self {
         let now = Utc::now();
@@ -52,7 +52,7 @@ impl Order {
             order_id,
             side,
             index_symbol,
-            quantity,
+            collateral_usd,  // Changed
             client_id,
             status: OrderStatus::Pending,
             created_at: now,

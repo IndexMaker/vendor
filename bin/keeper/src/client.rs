@@ -21,7 +21,7 @@ impl std::fmt::Display for OrderSide {
 pub struct CreateOrderRequest {
     pub side: OrderSide,
     pub index_symbol: String,
-    pub quantity: String,
+    pub collateral_usd: String,  // Changed from quantity!
     pub client_id: String,
 }
 
