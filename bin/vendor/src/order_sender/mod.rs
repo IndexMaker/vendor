@@ -1,8 +1,10 @@
+pub mod bitget;
 pub mod config;
 pub mod simulated;
 pub mod traits;
 pub mod types;
 
+pub use bitget::BitgetClient;
 pub use config::{BitgetCredentials, OrderSenderConfig, OrderSenderMode};
 pub use simulated::SimulatedOrderSender;
 pub use traits::OrderSender;

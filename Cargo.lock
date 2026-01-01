@@ -1899,6 +1899,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dotenv"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77c90badedccf4105eca100756a0b1289e191f6fcbdadd3cee1d2f614f97da8f"
+
+[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4980,6 +4986,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha256"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f880fc8562bdeb709793f00eb42a2ad0e672c4f883bbe59122b926eca935c8f6"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "hex",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "sha3"
 version = "0.10.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5934,15 +5953,18 @@ dependencies = [
  "amount-macros",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "common",
  "crc32fast",
  "derive_builder",
+ "dotenv",
  "ethers",
  "eyre",
  "futures",
  "futures-util",
+ "hmac",
  "itertools 0.14.0",
  "labels-macros",
  "parking_lot",
@@ -5950,6 +5972,8 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
+ "sha256",
  "tokio",
  "tokio-tungstenite 0.28.0",
  "tokio-util",
