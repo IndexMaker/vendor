@@ -76,7 +76,6 @@ impl OrderSenderConfig {
 
 impl OrderSenderConfigBuilder {
     pub fn build(self) -> Result<OrderSenderConfig> {
-        // Manually construct since we skipped the auto-generated build
         let mode = self.mode.ok_or_else(|| eyre::eyre!("mode is required"))?;
         let price_limit_bps = self.price_limit_bps.unwrap_or(5);
         let retry_attempts = self.retry_attempts.unwrap_or(3);
@@ -87,8 +86,16 @@ impl OrderSenderConfigBuilder {
                 let sim_sender = SimulatedOrderSender::new().with_failure_rate(*failure_rate);
                 Arc::new(RwLock::new(sim_sender))
             }
-            OrderSenderMode::Bitget(_) => {
-                return Err(eyre::eyre!("Bitget mode not yet implemented"));
+            OrderSenderMode::Bitget(credentials) => {
+                let bitget_sender = super::bitget::BitgetOrderSender::new(
+                    credentials.api_key.clone(),
+                    credentials.api_secret.clone(),
+                    credentials.passphrase.clone(),
+                    price_limit_bps,
+                    retry_attempts,
+                    trading_enabled,
+                );
+                Arc::new(RwLock::new(bitget_sender))
             }
         };
 

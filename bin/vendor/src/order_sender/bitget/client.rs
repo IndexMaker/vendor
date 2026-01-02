@@ -227,7 +227,7 @@ impl BitgetClient {
     }
 
     /// Convert Amount to quantity string for Bitget API
-    fn amount_to_quantity_string(amount: Amount) -> String {
+    pub fn amount_to_quantity_string(amount: Amount) -> String {
         let value_f64 = amount.to_u128_raw() as f64 / 1e18;
         format!("{:.8}", value_f64) // 8 decimal places for quantity precision
     }
