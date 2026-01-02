@@ -4,6 +4,7 @@ use eyre::{Context, Result};
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use std::time::Duration;
+use common::amount::Amount;
 
 pub struct BitgetClient {
     base_url: String,
@@ -215,5 +216,70 @@ impl BitgetClient {
 
             tokio::time::sleep(check_interval).await;
         }
+    }
+
+    /// Convert Amount to decimal string for Bitget API
+    /// Bitget expects prices as decimal strings like "95123.45"
+    fn amount_to_price_string(amount: Amount) -> String {
+        // Amount has 18 decimals, extract to f64 and format
+        let value_f64 = amount.to_u128_raw() as f64 / 1e18;
+        format!("{:.8}", value_f64) // 8 decimal places for price precision
+    }
+
+    /// Convert Amount to quantity string for Bitget API
+    fn amount_to_quantity_string(amount: Amount) -> String {
+        let value_f64 = amount.to_u128_raw() as f64 / 1e18;
+        format!("{:.8}", value_f64) // 8 decimal places for quantity precision
+    }
+
+    /// Place a limit order using Amount types
+    pub async fn place_limit_order_amount(
+        &self,
+        symbol: &str,
+        side: super::super::types::OrderSide,
+        quantity: Amount,
+        price: Amount,
+        client_order_id: Option<String>,
+    ) -> Result<PlaceOrderResponse> {
+        let side_str = match side {
+            super::super::types::OrderSide::Buy => "buy",
+            super::super::types::OrderSide::Sell => "sell",
+        };
+
+        let quantity_str = Self::amount_to_quantity_string(quantity);
+        let price_str = Self::amount_to_price_string(price);
+
+        tracing::debug!(
+            "Placing limit order: {} {} {} @ {}",
+            side_str,
+            quantity_str,
+            symbol,
+            price_str
+        );
+
+        self.place_limit_order(symbol, side_str, &quantity_str, &price_str, client_order_id)
+            .await
+    }
+
+    /// Get best ask price for a symbol
+    pub async fn get_best_ask(&self, symbol: &str) -> Result<Amount> {
+        let ticker = self.get_orderbook_ticker(symbol).await?;
+        let price_f64: f64 = ticker
+            .ask_price
+            .parse()
+            .map_err(|e| eyre::eyre!("Failed to parse ask price: {}", e))?;
+
+        Ok(Amount::from_u128_raw((price_f64 * 1e18) as u128))
+    }
+
+    /// Get best bid price for a symbol
+    pub async fn get_best_bid(&self, symbol: &str) -> Result<Amount> {
+        let ticker = self.get_orderbook_ticker(symbol).await?;
+        let price_f64: f64 = ticker
+            .bid_price
+            .parse()
+            .map_err(|e| eyre::eyre!("Failed to parse bid price: {}", e))?;
+
+        Ok(Amount::from_u128_raw((price_f64 * 1e18) as u128))
     }
 }

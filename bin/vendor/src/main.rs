@@ -66,6 +66,10 @@ struct Cli {
     /// API server port
     #[arg(long, default_value = "8080")]
     api_port: u16,
+
+    /// Price limit spread in basis points (default: 5 = 0.05%)
+    #[arg(long, default_value = "5")]
+    price_limit_bps: u16,
 }
 #[tokio::main]
 async fn main() -> Result<()> {
