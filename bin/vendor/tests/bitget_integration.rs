@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod bitget_tests {
-    use vendor::order_sender::BitgetClient;
+    use vendor::order_sender::{BitgetClient, types::{FeeDetail, FeeType}};
 
     #[tokio::test]
     #[ignore] // Run with: cargo test --test bitget_integration -- --ignored
@@ -171,5 +171,40 @@ mod bitget_tests {
         println!("Order result: {:?}", results[0]);
     
         sender.stop().await.expect("Failed to stop");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_fee_tracking() {
+        use vendor::order_sender::FeeTracker;
+        use common::amount::Amount;
+
+        let mut tracker = FeeTracker::new();
+
+        // Simulate some trades
+        for i in 0..10 {
+            let fee_type = if i % 2 == 0 {
+                FeeType::Maker
+            } else {
+                FeeType::Taker
+            };
+
+            let fee = FeeDetail::new(
+                Amount::from_u128_raw(1_000_000_000_000_000_000), // $1
+                "USDT".to_string(),
+                fee_type,
+            );
+
+            tracker.record_fee(Amount::from_u128_raw(1_000_000_000_000_000_000), Some(&fee));
+        }
+
+        println!("{}", tracker.summary());
+
+        let (maker_pct, taker_pct) = tracker.maker_taker_ratio();
+        assert_eq!(maker_pct, 50.0);
+        assert_eq!(taker_pct, 50.0);
+
+        let total = tracker.total_fees();
+        println!("Total fees: ${:.2}", total.to_u128_raw() as f64 / 1e18);
     }
 }

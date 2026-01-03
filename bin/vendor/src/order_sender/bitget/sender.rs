@@ -1,3 +1,5 @@
+use crate::order_sender::FeeTracker;
+
 use super::super::traits::OrderSender;
 use super::super::types::{AssetOrder, ExecutionResult, OrderSide, OrderStatus, OrderType};
 use super::client::BitgetClient;
@@ -42,6 +44,7 @@ pub struct BitgetOrderSender {
     fill_timeout: Duration,
     consecutive_failures: Arc<AtomicU32>,
     max_consecutive_failures: u32,
+    fee_tracker: Arc<parking_lot::RwLock<FeeTracker>>,
 }
 
 impl BitgetOrderSender {
@@ -62,7 +65,18 @@ impl BitgetOrderSender {
             fill_timeout: Duration::from_secs(30), // Wait up to 30s for order fill
             consecutive_failures: Arc::new(AtomicU32::new(0)),
             max_consecutive_failures: 5, // Circuit breaker threshold
+            fee_tracker: Arc::new(parking_lot::RwLock::new(FeeTracker::new())),
         }
+    }
+
+    /// Get fee tracker for reporting
+    pub fn get_fee_tracker(&self) -> Arc<parking_lot::RwLock<FeeTracker>> {
+        self.fee_tracker.clone()
+    }
+
+    /// Get fee summary
+    pub fn fee_summary(&self) -> String {
+        self.fee_tracker.read().summary()
     }
 
     /// Check if circuit breaker is tripped
@@ -370,6 +384,37 @@ impl BitgetOrderSender {
         let avg_price = Amount::from_u128_raw((avg_price_f64 * 1e18) as u128);
         let fees = Amount::from_u128_raw((fee_f64 * 1e18) as u128);
 
+        // Extract fee detail
+        let fee_detail = if fee_f64 > 0.0 {
+            // Determine if maker or taker based on order type
+            // Bitget doesn't always provide this, so we infer:
+            // - Limit orders that sit in book = Maker
+            // - Market orders = Taker
+            // - Limit orders that execute immediately = Taker
+            let fee_type = if detail.order_type == "market" {
+                super::super::types::FeeType::Taker
+            } else if detail.status == "full_fill" && detail.order_type == "limit" {
+                // If filled immediately, likely taker
+                super::super::types::FeeType::Taker
+            } else {
+                // Otherwise maker
+                super::super::types::FeeType::Maker
+            };
+
+            Some(super::super::types::FeeDetail::new(
+                fees,
+                detail.fee_currency.clone(),
+                fee_type,
+            ))
+        } else {
+            None
+        };
+
+        // Record fee in tracker
+        if let Some(ref fee_detail) = fee_detail {
+            self.fee_tracker.write().record_fee(fees, Some(fee_detail));
+        }
+
         let status = if detail.is_filled() {
             OrderStatus::Filled
         } else if detail.is_partially_filled() {
@@ -394,6 +439,7 @@ impl BitgetOrderSender {
             filled_quantity,
             avg_price,
             fees,
+            fee_detail,
             status,
             error_message,
         })
@@ -476,11 +522,15 @@ impl BitgetOrderSender {
 
             if result.is_success() {
                 tracing::info!(
-                    "  ✓ Filled: {} - {} @ ${} (fee: ${})",
+                    "  ✓ Filled: {} - {} @ ${} (fee: ${} - {})",
                     result.order_id,
                     result.filled_quantity,
                     result.avg_price.to_u128_raw() as f64 / 1e18,
-                    result.fees.to_u128_raw() as f64 / 1e18
+                    result.fees.to_u128_raw() as f64 / 1e18,
+                    result.fee_detail
+                        .as_ref()
+                        .map(|f| f.fee_type.to_string())
+                        .unwrap_or_else(|| "Unknown".to_string())
                 );
             } else {
                 tracing::warn!(
@@ -577,11 +627,15 @@ impl OrderSender for BitgetOrderSender {
 
             if result.is_success() {
                 tracing::info!(
-                    "  ✓ Filled: {} - {} @ ${} (fee: ${})",
+                    "  ✓ Filled: {} - {} @ ${} (fee: ${} - {})",
                     result.order_id,
                     result.filled_quantity,
                     result.avg_price.to_u128_raw() as f64 / 1e18,
-                    result.fees.to_u128_raw() as f64 / 1e18
+                    result.fees.to_u128_raw() as f64 / 1e18,
+                    result.fee_detail
+                        .as_ref()
+                        .map(|f| f.fee_type.to_string())
+                        .unwrap_or_else(|| "Unknown".to_string())
                 );
             } else {
                 tracing::warn!(

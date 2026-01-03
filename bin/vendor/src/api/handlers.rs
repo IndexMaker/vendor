@@ -119,3 +119,14 @@ pub async fn get_inventory_summary(State(state): State<AppState>) -> Json<serde_
         "summary": inventory.summary(),
     }))
 }
+
+/// Get fee statistics
+pub async fn get_fee_stats(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let inventory = state.inventory.read().await;
+    let total_fees = inventory.get_total_fees();
+
+    Json(serde_json::json!({
+        "total_fees_usd": format!("{:.2}", total_fees.to_u128_raw() as f64 / 1e18),
+        "currency": "USD"
+    }))
+}

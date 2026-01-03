@@ -1,11 +1,13 @@
 pub mod bitget;
 pub mod config;
+pub mod fees;
 pub mod simulated;
 pub mod traits;
 pub mod types;
 
 pub use bitget::BitgetClient;
 pub use config::{BitgetCredentials, OrderSenderConfig, OrderSenderMode};
+pub use fees::FeeTracker;
 pub use simulated::SimulatedOrderSender;
 pub use traits::OrderSender;
 pub use types::{AssetOrder, ExecutionResult, OrderSide, OrderStatus, OrderType};

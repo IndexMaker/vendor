@@ -59,16 +59,37 @@ impl SimulatedOrderSender {
             .checked_mul(fee_rate)
             .unwrap_or(Amount::ZERO);
 
+        // Create fee detail (simulate as maker 70% of the time)
+        let fee_type = if rng.gen_bool(0.7) {
+            super::types::FeeType::Maker
+        } else {
+            super::types::FeeType::Taker
+        };
+
+        let fee_detail = Some(super::types::FeeDetail::new(
+            fees,
+            "USDT".to_string(),
+            fee_type,
+        ));
+
         tracing::debug!(
-            "Simulated fill: {} {} {} @ ${} (fee: ${})",
+            "Simulated fill: {} {} {} @ ${} (fee: ${} - {})",
             order.side,
             order.quantity,
             order.symbol,
             avg_price,
-            fees
+            fees,
+            fee_type
         );
 
-        ExecutionResult::success(order.symbol.clone(), order_id, order.quantity, avg_price, fees)
+        ExecutionResult::success(
+            order_id,
+            order.symbol.clone(),
+            order.quantity,
+            avg_price,
+            fees,
+            fee_detail,
+        )
     }
 }
 

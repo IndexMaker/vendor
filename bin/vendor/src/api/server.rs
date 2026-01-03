@@ -1,5 +1,5 @@
 use super::handlers::{create_order, get_inventory_summary, health_check, AppState};
-use crate::inventory::InventoryManager;
+use crate::{api::handlers::get_fee_stats, inventory::InventoryManager};
 use axum::{
     routing::{get, post},
     Router,
@@ -36,6 +36,7 @@ impl ApiServer {
             .route("/health", get(health_check))
             .route("/api/v1/orders", post(create_order))
             .route("/api/v1/inventory", get(get_inventory_summary))
+            .route("/api/v1/fees", get(get_fee_stats))
             .with_state(self.state);
 
         let listener = TcpListener::bind(&self.addr).await?;

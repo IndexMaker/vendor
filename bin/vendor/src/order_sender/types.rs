@@ -84,18 +84,20 @@ pub struct ExecutionResult {
     pub order_id: String,
     pub filled_quantity: Amount,
     pub avg_price: Amount,
-    pub fees: Amount,
+    pub fees: Amount,                    // Total fee in USD equivalent
+    pub fee_detail: Option<FeeDetail>,   // Add this - detailed fee breakdown
     pub status: OrderStatus,
     pub error_message: Option<String>,
 }
 
 impl ExecutionResult {
     pub fn success(
-        symbol: String,
         order_id: String,
+        symbol: String,
         filled_quantity: Amount,
         avg_price: Amount,
         fees: Amount,
+        fee_detail: Option<FeeDetail>,
     ) -> Self {
         Self {
             symbol,
@@ -103,6 +105,7 @@ impl ExecutionResult {
             filled_quantity,
             avg_price,
             fees,
+            fee_detail,
             status: OrderStatus::Filled,
             error_message: None,
         }
@@ -115,6 +118,7 @@ impl ExecutionResult {
             filled_quantity: Amount::ZERO,
             avg_price: Amount::ZERO,
             fees: Amount::ZERO,
+            fee_detail: None,
             status: OrderStatus::Failed,
             error_message: Some(error),
         }
@@ -122,5 +126,69 @@ impl ExecutionResult {
 
     pub fn is_success(&self) -> bool {
         matches!(self.status, OrderStatus::Filled | OrderStatus::PartiallyFilled)
+    }
+
+    /// Calculate fee as percentage of notional value
+    pub fn fee_percentage(&self) -> f64 {
+        if self.filled_quantity == Amount::ZERO || self.avg_price == Amount::ZERO {
+            return 0.0;
+        }
+
+        let notional = self
+            .filled_quantity
+            .checked_mul(self.avg_price)
+            .unwrap_or(Amount::ZERO);
+
+        if notional == Amount::ZERO {
+            return 0.0;
+        }
+
+        let fee_f64 = self.fees.to_u128_raw() as f64;
+        let notional_f64 = notional.to_u128_raw() as f64;
+
+        (fee_f64 / notional_f64) * 100.0
+    }
+}
+
+/// Fee breakdown for an order
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeeDetail {
+    pub amount: Amount,
+    pub currency: String,
+    pub fee_type: FeeType,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FeeType {
+    Maker,  // Provide liquidity (limit order that sits in orderbook)
+    Taker,  // Take liquidity (market order or limit that executes immediately)
+    Unknown,
+}
+
+impl std::fmt::Display for FeeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FeeType::Maker => write!(f, "Maker"),
+            FeeType::Taker => write!(f, "Taker"),
+            FeeType::Unknown => write!(f, "Unknown"),
+        }
+    }
+}
+
+impl FeeDetail {
+    pub fn new(amount: Amount, currency: String, fee_type: FeeType) -> Self {
+        Self {
+            amount,
+            currency,
+            fee_type,
+        }
+    }
+
+    pub fn zero(currency: String) -> Self {
+        Self {
+            amount: Amount::ZERO,
+            currency,
+            fee_type: FeeType::Unknown,
+        }
     }
 }

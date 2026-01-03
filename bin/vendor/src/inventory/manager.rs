@@ -25,6 +25,8 @@ pub struct InventoryManager {
 
     // Storage path
     storage_path: PathBuf,
+
+    total_fees_paid: Amount,
 }
 
 impl InventoryManager {
@@ -39,7 +41,21 @@ impl InventoryManager {
             basket_manager,
             price_tracker,
             storage_path,
+            total_fees_paid: Amount::ZERO,
         }
+    }
+
+    /// Get total fees paid
+    pub fn get_total_fees(&self) -> Amount {
+        self.total_fees_paid
+    }
+
+    /// Record fees from order execution
+    fn record_fees(&mut self, fees: Amount) {
+        self.total_fees_paid = self
+            .total_fees_paid
+            .checked_add(fees)
+            .unwrap_or(self.total_fees_paid);
     }
 
     pub async fn load_from_storage(
