@@ -2,6 +2,7 @@ use super::storage::InventorySnapshot;
 use super::types::{IndexPosition, Order, OrderResult, OrderSide, Position};
 use crate::basket::{BasketManager, Index};
 use crate::onchain::PriceTracker;
+use crate::order_sender::{AssetOrder, ExecutionResult, OrderSender};
 use common::amount::Amount;
 use eyre::{eyre, Result};
 use parking_lot::RwLock;
@@ -9,6 +10,7 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::RwLock as TokioRwLock;
 
 pub struct InventoryManager {
     // Asset positions (BTC, ETH, SOL, etc.)
@@ -27,6 +29,8 @@ pub struct InventoryManager {
     storage_path: PathBuf,
 
     total_fees_paid: Amount,
+
+    order_sender: Option<Arc<TokioRwLock<dyn OrderSender>>>,
 }
 
 impl InventoryManager {
@@ -34,6 +38,7 @@ impl InventoryManager {
         basket_manager: Arc<RwLock<BasketManager>>,
         price_tracker: Arc<PriceTracker>,
         storage_path: PathBuf,
+        order_sender: Option<Arc<TokioRwLock<dyn OrderSender>>>,
     ) -> Self {
         Self {
             positions: HashMap::new(),
@@ -42,6 +47,7 @@ impl InventoryManager {
             price_tracker,
             storage_path,
             total_fees_paid: Amount::ZERO,
+            order_sender,
         }
     }
 
@@ -62,10 +68,11 @@ impl InventoryManager {
         basket_manager: Arc<RwLock<BasketManager>>,
         price_tracker: Arc<PriceTracker>,
         storage_path: PathBuf,
+        order_sender: Option<Arc<TokioRwLock<dyn OrderSender>>>,
     ) -> Result<Self> {
         let snapshot = InventorySnapshot::load_from_file(&storage_path).await?;
 
-        let mut manager = Self::new(basket_manager, price_tracker, storage_path);
+        let mut manager = Self::new(basket_manager, price_tracker, storage_path, order_sender);
         manager.positions = snapshot.positions;
 
         Ok(manager)
@@ -108,12 +115,29 @@ impl InventoryManager {
         // Calculate required quantities for each underlying asset
         let asset_quantities = self.calculate_asset_quantities(&index, units)?;
 
-        // TODO: Execute orders via OrderSender (Phase 3+)
-        // For now, just update positions directly with mock data
+        // Execute orders via OrderSender if available
+        let mut total_fees = Amount::ZERO;
+        
+        if let Some(ref sender) = self.order_sender {
+            // Real order execution
+            let execution_results = self.execute_asset_orders(&asset_quantities, &order.order_id, sender).await?;
 
-        // Update asset positions
-        for (symbol, quantity) in &asset_quantities {
-            self.update_asset_position(symbol, *quantity, &order.order_id);
+            for result in &execution_results {
+                if result.is_success() {
+                    self.update_asset_position(&result.symbol, result.filled_quantity, &order.order_id);
+                    total_fees = total_fees.checked_add(result.fees).unwrap_or(total_fees);
+                } else {
+                    tracing::error!("Failed to execute order for {}: {:?}", result.symbol, result.error_message);
+                }
+            }
+
+            self.record_fees(total_fees);
+        } else {
+            // Mock execution (no OrderSender)
+            tracing::warn!("No OrderSender - using mock execution");
+            for (symbol, quantity) in &asset_quantities {
+                self.update_asset_position(symbol, *quantity, &order.order_id);
+            }
         }
 
         // Update index position
@@ -138,18 +162,59 @@ impl InventoryManager {
             .collect();
 
         tracing::info!(
-            "✓ Order {} filled: {} units of '{}' (cost: ${})",
+            "✓ Order {} filled: {} units of '{}' (cost: ${}, fees: ${})",
             order.order_id,
             units,
             order.index_symbol,
-            order.collateral_usd
+            order.collateral_usd,
+            total_fees
         );
 
         Ok(OrderResult::success(
             order.order_id,
             index_position,
             asset_positions,
+            total_fees,
         ))
+    }
+
+    /// Execute asset orders via OrderSender
+    async fn execute_asset_orders(
+        &self,
+        asset_quantities: &HashMap<String, Amount>,
+        parent_order_id: &str,
+        sender: &Arc<TokioRwLock<dyn OrderSender>>,
+    ) -> Result<Vec<ExecutionResult>> {
+        let mut orders = Vec::new();
+
+        for (symbol, quantity) in asset_quantities {
+            // Convert symbol to trading pair (e.g., BTC -> BTCUSDT)
+            let trading_symbol = format!("{}USDT", symbol);
+
+            let order = AssetOrder::limit(
+                trading_symbol,
+                crate::order_sender::OrderSide::Buy,
+                *quantity,
+                Amount::ZERO, // Will use smart pricing
+            );
+
+            orders.push(order);
+        }
+
+        if orders.is_empty() {
+            return Ok(vec![]);
+        }
+
+        tracing::info!(
+            "Executing {} asset orders for parent order {}",
+            orders.len(),
+            parent_order_id
+        );
+
+        let mut sender_guard = sender.write().await;
+        let results = sender_guard.send_orders(orders).await?;
+
+        Ok(results)
     }
 
     /// Calculate required quantities of underlying assets for a given index quantity
@@ -305,5 +370,9 @@ impl InventoryManager {
         collateral_usd
             .checked_div(index_price)
             .ok_or_else(|| eyre!("Failed to calculate units from collateral"))
+    }
+
+    pub fn position_count(&self) -> usize {
+        self.positions.len()
     }
 }

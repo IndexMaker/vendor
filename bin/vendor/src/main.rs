@@ -86,6 +86,34 @@ async fn main() -> Result<()> {
 
     tracing::info!("Starting VaultWorks Vendor");
 
+    // Initialize OrderSender (before inventory)
+    tracing::info!("Initializing OrderSender...");
+
+    let order_sender_mode = if let Ok(credentials) = order_sender::BitgetCredentials::from_env() {
+        let trading_enabled = order_sender::BitgetCredentials::trading_enabled_from_env();
+        tracing::info!("Using Bitget order sender (trading: {})", trading_enabled);
+        order_sender::OrderSenderMode::Bitget(credentials)
+    } else {
+        tracing::warn!("No Bitget credentials - using simulated order sender");
+        order_sender::OrderSenderMode::Simulated { failure_rate: 0.0 }
+    };
+
+    let order_sender_config = order_sender::OrderSenderConfig::builder()
+        .mode(order_sender_mode)
+        .price_limit_bps(cli.price_limit_bps)
+        .retry_attempts(
+            std::env::var("RETRY_ATTEMPTS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3),
+        )
+        .trading_enabled(order_sender::BitgetCredentials::trading_enabled_from_env())
+        .build()?;
+
+    order_sender_config.start().await?;
+    let order_sender = order_sender_config.get_sender();
+    tracing::info!("✓ OrderSender initialized");
+
     // Load configuration
     let config = VendorConfig::default();
 
@@ -151,6 +179,7 @@ async fn main() -> Result<()> {
             bm.clone(),
             price_tracker.clone(),
             inventory_path,
+            order_sender.clone(),
         )
         .await?;
 
@@ -361,6 +390,9 @@ async fn main() -> Result<()> {
     if let Some(api_cancel) = api_server {
         api_cancel.cancel();
     }
+
+    order_sender_config.stop().await?;
+    tracing::info!("✓ OrderSender stopped");
 
     tracing::info!("Vendor stopped");
     Ok(())

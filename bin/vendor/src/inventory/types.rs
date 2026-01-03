@@ -27,6 +27,18 @@ pub enum OrderStatus {
     Failed,
 }
 
+impl std::fmt::Display for OrderStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OrderStatus::Pending => write!(f, "Pending"),
+            OrderStatus::Filled => write!(f, "Filled"),
+            OrderStatus::PartiallyFilled => write!(f, "PartiallyFilled"),
+            OrderStatus::Rejected => write!(f, "Rejected"),
+            OrderStatus::Failed => write!(f, "Failed"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Order {
     pub order_id: String,
@@ -209,6 +221,7 @@ pub struct OrderResult {
     pub message: String,
     pub index_position: Option<IndexPosition>,
     pub asset_positions: Vec<Position>,
+    pub total_fees: Amount,
 }
 
 impl OrderResult {
@@ -216,6 +229,7 @@ impl OrderResult {
         order_id: String,
         index_position: IndexPosition,
         asset_positions: Vec<Position>,
+        total_fees: Amount,
     ) -> Self {
         Self {
             order_id,
@@ -223,6 +237,7 @@ impl OrderResult {
             message: "Order successfully filled".to_string(),
             index_position: Some(index_position),
             asset_positions,
+            total_fees,
         }
     }
 
@@ -233,16 +248,17 @@ impl OrderResult {
             message: reason,
             index_position: None,
             asset_positions: vec![],
+            total_fees: Amount::ZERO,
         }
     }
 
-    pub fn failed(order_id: String, error: String) -> Self {
-        Self {
-            order_id,
-            status: OrderStatus::Failed,
-            message: error,
-            index_position: None,
-            asset_positions: vec![],
-        }
-    }
+    // pub fn failed(order_id: String, error: String) -> Self {
+    //     Self {
+    //         order_id,
+    //         status: OrderStatus::Failed,
+    //         message: error,
+    //         index_position: None,
+    //         asset_positions: vec![],
+    //     }
+    // }
 }

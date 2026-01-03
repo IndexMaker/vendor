@@ -29,6 +29,12 @@ impl BitgetCredentials {
             passphrase: std::env::var("BITGET_PASSPHRASE")?,
         })
     }
+
+    pub fn trading_enabled_from_env() -> bool {
+        std::env::var("BITGET_TRADING_ENABLED")
+            .unwrap_or_else(|_| "0".to_string())
+            == "1"
+    }
 }
 
 #[derive(Builder)]

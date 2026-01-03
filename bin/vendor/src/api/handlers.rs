@@ -16,12 +16,16 @@ pub struct AppState {
 }
 
 /// Health check endpoint
-pub async fn health_check() -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "healthy".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        timestamp: Utc::now().to_rfc3339(),
-    })
+pub async fn health_check(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let inventory = state.inventory.read().await;
+
+    Json(serde_json::json!({
+        "status": "healthy",
+        "version": env!("CARGO_PKG_VERSION"),
+        "positions_count": inventory.position_count(),
+        "total_fees_paid": format!("{:.4}", inventory.get_total_fees().to_u128_raw() as f64 / 1e18),
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    }))
 }
 
 /// Create order endpoint
@@ -78,7 +82,12 @@ pub async fn create_order(
         }
     };
 
-    tracing::info!("Order {} processed successfully: {:?}", order_id, result.status);
+    tracing::info!(
+        "Order {} processed: {} (fees: ${})",
+        order_id,
+        result.status,
+        result.total_fees.to_u128_raw() as f64 / 1e18
+    );
 
     (
         StatusCode::OK,
