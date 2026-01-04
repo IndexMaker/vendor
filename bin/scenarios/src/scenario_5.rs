@@ -163,7 +163,7 @@ where
 
         let call = IFactor::updateIndexQuoteCall {
             vendor_id,
-            index: index_id,
+            index_id,
         };
         
         let tx = TransactionRequest::default()
@@ -183,7 +183,7 @@ where
 
         let call = IFactor::submitBuyOrderCall {
             vendor_id,
-            index: index_id,
+            index_id,
             collateral_added: collateral_added.to_u128_raw(),
             collateral_removed: collateral_removed.to_u128_raw(),
             max_order_size: max_order_size.to_u128_raw(),

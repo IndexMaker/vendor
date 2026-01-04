@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use std::vec::Vec;
 
 #[inline]
 pub fn read_u128(input: &[u8]) -> u128 {

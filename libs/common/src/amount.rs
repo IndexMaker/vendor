@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use std::vec::Vec;
 
 use alloy_primitives::{ruint::UintTryTo, U128, U256};
 use serde::{Deserialize, Serialize};
