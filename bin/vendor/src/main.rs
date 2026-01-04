@@ -25,6 +25,7 @@ mod onchain;
 mod inventory;
 mod api;
 mod order_sender;
+mod margin;
 
 use basket::BasketManager;
 use inventory::InventoryManager;
@@ -116,6 +117,13 @@ async fn main() -> Result<()> {
 
     // Load configuration
     let config = VendorConfig::default();
+
+    // Access margin config
+    let margin_config = config.margin.clone();
+    let min_order = margin_config.min_order_size_usd;
+    let total_exp = margin_config.total_exposure_usd;
+
+    tracing::info!("Margin config: min_order=${}, total_exposure=${}", min_order, total_exp);
 
     // Load basket manager if config path provided
     let (symbols, basket_manager, asset_mapper, index_mapper) = if let Some(config_path) = &cli.config_path {
