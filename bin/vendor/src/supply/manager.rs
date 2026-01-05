@@ -3,7 +3,7 @@ use crate::onchain::AssetMapper;
 use common::amount::Amount;
 use eyre::{eyre, Result};
 use parking_lot::RwLock;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 /// Manages vendor's supply state (long/short positions per asset)
 /// Supply is tracked off-chain and submitted to on-chain when needed
@@ -139,5 +139,86 @@ impl SupplyManager {
             .filter(|s| s.supply_long != Amount::ZERO || s.supply_short != Amount::ZERO)
             .map(|s| s.symbol.clone())
             .collect()
+    }
+
+    /// Calculate delta for a specific asset
+    /// Delta = (supply_long + demand_short) - (supply_short + demand_long)
+    /// Returns (is_long, delta_amount)
+    pub fn calculate_delta(
+        &self,
+        symbol: &str,
+        demand_long: Amount,
+        demand_short: Amount,
+    ) -> Option<(bool, Amount)> {
+        let supply = self.state.get_supply(symbol)?;
+
+        // Delta = (supply_long + demand_short) - (supply_short + demand_long)
+        let left_side = supply.supply_long
+            .checked_add(demand_short)
+            .unwrap_or(supply.supply_long);
+
+        let right_side = supply.supply_short
+            .checked_add(demand_long)
+            .unwrap_or(supply.supply_short);
+
+        // Calculate net delta
+        if left_side >= right_side {
+            let delta = left_side.checked_sub(right_side).unwrap_or(Amount::ZERO);
+            Some((true, delta))  // Positive delta (long)
+        } else {
+            let delta = right_side.checked_sub(left_side).unwrap_or(Amount::ZERO);
+            Some((false, delta))  // Negative delta (short)
+        }
+    }
+
+    /// Calculate max delta across all assets
+    /// Returns (symbol, is_long, max_delta)
+    pub fn calculate_max_delta(
+        &self,
+        demand_long_map: &HashMap<String, Amount>,
+        demand_short_map: &HashMap<String, Amount>,
+    ) -> Option<(String, bool, Amount)> {
+        let mut max_delta = Amount::ZERO;
+        let mut max_symbol = String::new();
+        let mut max_is_long = true;
+
+        for symbol in self.state.supplies.keys() {
+            let demand_long = demand_long_map.get(symbol).copied().unwrap_or(Amount::ZERO);
+            let demand_short = demand_short_map.get(symbol).copied().unwrap_or(Amount::ZERO);
+
+            if let Some((is_long, delta)) = self.calculate_delta(symbol, demand_long, demand_short) {
+                if delta > max_delta {
+                    max_delta = delta;
+                    max_symbol = symbol.clone();
+                    max_is_long = is_long;
+                }
+            }
+        }
+
+        if max_delta == Amount::ZERO {
+            None
+        } else {
+            Some((max_symbol, max_is_long, max_delta))
+        }
+    }
+
+    /// Get all deltas for inspection
+    pub fn get_all_deltas(
+        &self,
+        demand_long_map: &HashMap<String, Amount>,
+        demand_short_map: &HashMap<String, Amount>,
+    ) -> HashMap<String, (bool, Amount)> {
+        let mut deltas = HashMap::new();
+
+        for symbol in self.state.supplies.keys() {
+            let demand_long = demand_long_map.get(symbol).copied().unwrap_or(Amount::ZERO);
+            let demand_short = demand_short_map.get(symbol).copied().unwrap_or(Amount::ZERO);
+
+            if let Some(delta) = self.calculate_delta(symbol, demand_long, demand_short) {
+                deltas.insert(symbol.clone(), delta);
+            }
+        }
+
+        deltas
     }
 }

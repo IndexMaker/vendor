@@ -27,6 +27,7 @@ mod api;
 mod order_sender;
 mod margin;
 mod supply;
+mod rebalance;
 
 use basket::BasketManager;
 use inventory::InventoryManager;
