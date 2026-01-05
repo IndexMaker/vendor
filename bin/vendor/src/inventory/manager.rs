@@ -1,16 +1,18 @@
 use super::storage::InventorySnapshot;
 use super::types::{IndexPosition, Order, OrderResult, OrderSide, Position};
 use crate::basket::{BasketManager, Index};
+use crate::supply::SupplyManager;
 use crate::onchain::PriceTracker;
 use crate::order_sender::{AssetOrder, ExecutionResult, OrderSender};
 use common::amount::Amount;
 use eyre::{eyre, Result};
-use parking_lot::RwLock;
+use parking_lot::RwLock as SyncRwLock;
 use rand::Rng;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock as TokioRwLock;
+
 
 pub struct InventoryManager {
     // Asset positions (BTC, ETH, SOL, etc.)
@@ -20,7 +22,7 @@ pub struct InventoryManager {
     index_positions: HashMap<String, IndexPosition>,
 
     // Reference to basket manager (for index composition)
-    basket_manager: Arc<RwLock<BasketManager>>,
+    basket_manager: Arc<SyncRwLock<BasketManager>>,
 
     // Reference to price tracker (for current prices)
     price_tracker: Arc<PriceTracker>,
@@ -31,14 +33,17 @@ pub struct InventoryManager {
     total_fees_paid: Amount,
 
     order_sender: Option<Arc<TokioRwLock<dyn OrderSender>>>,
+    
+    supply_manager: Option<Arc<SyncRwLock<SupplyManager>>>,
 }
 
 impl InventoryManager {
     pub fn new(
-        basket_manager: Arc<RwLock<BasketManager>>,
+        basket_manager: Arc<SyncRwLock<BasketManager>>,
         price_tracker: Arc<PriceTracker>,
         storage_path: PathBuf,
         order_sender: Option<Arc<TokioRwLock<dyn OrderSender>>>,
+        supply_manager: Option<Arc<SyncRwLock<SupplyManager>>>,
     ) -> Self {
         Self {
             positions: HashMap::new(),
@@ -48,6 +53,7 @@ impl InventoryManager {
             storage_path,
             total_fees_paid: Amount::ZERO,
             order_sender,
+            supply_manager,
         }
     }
 
@@ -65,14 +71,21 @@ impl InventoryManager {
     }
 
     pub async fn load_from_storage(
-        basket_manager: Arc<RwLock<BasketManager>>,
+        basket_manager: Arc<SyncRwLock<BasketManager>>,
         price_tracker: Arc<PriceTracker>,
         storage_path: PathBuf,
         order_sender: Option<Arc<TokioRwLock<dyn OrderSender>>>,
+        supply_manager: Option<Arc<SyncRwLock<SupplyManager>>>,
     ) -> Result<Self> {
         let snapshot = InventorySnapshot::load_from_file(&storage_path).await?;
 
-        let mut manager = Self::new(basket_manager, price_tracker, storage_path, order_sender);
+        let mut manager = Self::new(
+            basket_manager,
+            price_tracker,
+            storage_path,
+            order_sender,
+            supply_manager,
+        );
         manager.positions = snapshot.positions;
 
         Ok(manager)
@@ -126,6 +139,15 @@ impl InventoryManager {
                 if result.is_success() {
                     self.update_asset_position(&result.symbol, result.filled_quantity, &order.order_id);
                     total_fees = total_fees.checked_add(result.fees).unwrap_or(total_fees);
+
+                    // Record in supply manager
+                    // Remove "USDT" suffix to get base symbol (e.g., BTCUSDT -> BTC)
+                    if let Some(ref supply_mgr) = self.supply_manager {
+                        let base_symbol = result.symbol.trim_end_matches("USDT");
+                        if let Err(e) = supply_mgr.write().record_buy(base_symbol, result.filled_quantity) {
+                            tracing::error!("Failed to record supply for {}: {:?}", base_symbol, e);
+                        }
+                    }
                 } else {
                     tracing::error!("Failed to execute order for {}: {:?}", result.symbol, result.error_message);
                 }

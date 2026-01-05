@@ -26,6 +26,7 @@ mod inventory;
 mod api;
 mod order_sender;
 mod margin;
+mod supply;
 
 use basket::BasketManager;
 use inventory::InventoryManager;
@@ -126,7 +127,7 @@ async fn main() -> Result<()> {
     tracing::info!("Margin config: min_order=${}, total_exposure=${}", min_order, total_exp);
 
     // Load basket manager if config path provided
-    let (symbols, basket_manager, asset_mapper, index_mapper) = if let Some(config_path) = &cli.config_path {
+    let (symbols, basket_manager, asset_mapper, index_mapper, asset_mapper_locked) = if let Some(config_path) = &cli.config_path {
         tracing::info!("Loading configuration from: {}", config_path);
 
         // Load basket manager
@@ -135,22 +136,26 @@ async fn main() -> Result<()> {
 
         // Load asset mapper
         let asset_path = PathBuf::from(config_path).join("assets.json");
-        let asset_mapper = AssetMapper::load_from_file(&asset_path).await?;
+        let asset_mapper_raw = AssetMapper::load_from_file(&asset_path).await?;
+        let asset_mapper = Arc::new(asset_mapper_raw);  // For OnchainSubmitter
+        let asset_mapper_locked = Arc::new(parking_lot::RwLock::new(asset_mapper.as_ref().clone()));  // For SupplyManager
 
         // Load index mapper
         let index_path = PathBuf::from(config_path).join("index_ids.json");
-        let index_mapper = IndexMapper::load_from_file(&index_path).await?;
+        let index_mapper_raw = IndexMapper::load_from_file(&index_path).await?;
+        let index_mapper = Arc::new(index_mapper_raw);  // For OnchainSubmitter
+        let index_mapper_locked = Arc::new(parking_lot::RwLock::new(index_mapper.as_ref()));  // For validation
 
         // Get symbols
         let symbols = basket_manager.get_all_unique_symbols();
 
         // Validate all assets have IDs
-        asset_mapper.validate_all_mapped(&symbols)?;
+        asset_mapper_locked.read().validate_all_mapped(&symbols)?;
         tracing::info!("✓ All assets have valid ID mappings");
 
         // Validate all indices have IDs
         let index_symbols = basket_manager.get_index_symbols();
-        index_mapper.validate_all_indices(&index_symbols)?;
+        index_mapper_locked.read().validate_all_indices(&index_symbols)?;
         tracing::info!("✓ All indices have valid ID mappings");
 
         tracing::info!("Index symbols: {:?}", index_symbols);
@@ -159,14 +164,14 @@ async fn main() -> Result<()> {
         // NOW wrap in Arc<RwLock> after validation
         let basket_manager = Arc::new(RwLock::new(basket_manager));
 
-        (symbols, Some(basket_manager), Some(asset_mapper), Some(index_mapper))
+        (symbols, Some(basket_manager), Some(asset_mapper), Some(index_mapper), Some(asset_mapper_locked))
     } else if !cli.symbols.is_empty() {
         tracing::info!("Using symbols from CLI: {:?}", cli.symbols);
-        (cli.symbols, None, None, None)
+        (cli.symbols, None, None, None, None)
     } else {
         let default_symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
         tracing::info!("Using default symbols: {:?}", default_symbols);
-        (default_symbols, None, None, None)
+        (default_symbols, None, None, None, None)
     };
 
     if symbols.is_empty() {
@@ -180,6 +185,25 @@ async fn main() -> Result<()> {
     // Create price tracker
     let price_tracker = Arc::new(PriceTracker::new());
 
+    // Initialize SupplyManager (only if asset_mapper_locked exists)
+    let supply_manager = if let Some(ref asset_mapper_arc) = asset_mapper_locked {
+        let mut mgr = supply::SupplyManager::new(asset_mapper_arc.clone());
+
+        if !symbols.is_empty() {
+            if let Err(e) = mgr.initialize(&symbols) {
+                tracing::warn!("Failed to initialize supply tracking: {:?}", e);
+            }
+        }
+
+        Some(Arc::new(parking_lot::RwLock::new(mgr)))
+    } else {
+        None
+    };
+
+    if supply_manager.is_some() {
+        tracing::info!("✓ SupplyManager initialized");
+    }
+
     // Create inventory manager (only if basket_manager exists)
     let inventory = if let Some(ref bm) = basket_manager {
         let inventory_path = PathBuf::from("./data/inventory_manager.json");
@@ -188,6 +212,7 @@ async fn main() -> Result<()> {
             price_tracker.clone(),
             inventory_path,
             order_sender.clone(),
+            supply_manager.clone(),
         )
         .await?;
 
@@ -340,8 +365,8 @@ async fn main() -> Result<()> {
             let submitter = OnchainSubmitter::new(
                 submitter_config,
                 provider,
-                Arc::new(asset_mapper),
-                Arc::new(index_mapper),
+                asset_mapper,
+                index_mapper,
                 basket_manager,
                 price_tracker.clone(),
             );

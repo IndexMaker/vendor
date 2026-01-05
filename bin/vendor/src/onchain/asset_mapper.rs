@@ -3,6 +3,7 @@ use serde_json;
 use std::collections::HashMap;
 use std::path::Path;
 
+#[derive(Debug, Clone)]
 pub struct AssetMapper {
     symbol_to_id: HashMap<String, u128>,
     id_to_symbol: HashMap<u128, String>,
