@@ -3,11 +3,14 @@ use eyre::Result;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+use crate::onchain::StalenessConfig;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VendorConfig {
     pub market_data: MarketDataConfig,
     pub blockchain: BlockchainConfig,
     pub margin: MarginConfig,
+    pub staleness: StalenessConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,7 +111,8 @@ impl Default for VendorConfig {
                 private_key: String::new(),
                 castle_address: None,
             },
-            margin: MarginConfig::default(),  // Add this
+            margin: MarginConfig::default(),
+            staleness: StalenessConfig::default(),
         }
     }
 }

@@ -1,0 +1,27 @@
+{
+  "market_data": {
+    "bitget": {
+      "websocket_url": "wss://ws.bitget.com/v2/ws/public",
+      "subscription_limit_rate": 240,
+      "stale_check_period_secs": 10,
+      "stale_timeout_secs": 30,
+      "heartbeat_interval_secs": 30
+    }
+  },
+  "blockchain": {
+    "rpc_url": "http://localhost:8547",
+    "private_key": "",
+    "castle_address": null
+  },
+  "margin": {
+    "min_order_size_usd": 5.0,
+    "total_exposure_usd": 1000.0,
+    "price_change_threshold": 0.05,
+    "margin_update_timeout_secs": 3600
+  },
+  "staleness": {
+    "price_threshold": 0.005,
+    "liquidity_threshold": 0.10,
+    "time_threshold_secs": 300
+  }
+}

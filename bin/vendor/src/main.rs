@@ -186,6 +186,23 @@ async fn main() -> Result<()> {
     // Create price tracker
     let price_tracker = Arc::new(PriceTracker::new());
 
+    // Initialize StalenessManager (only if asset_mapper exists)
+    let staleness_manager = if let Some(ref asset_mapper_arc) = asset_mapper_locked {
+        let mgr = onchain::StalenessManager::new(
+            config.staleness.clone(),
+            price_tracker.clone(),
+            asset_mapper_arc.clone(),
+        );
+        
+        Some(Arc::new(parking_lot::RwLock::new(mgr)))
+    } else {
+        None
+    };
+    
+    if staleness_manager.is_some() {
+        tracing::info!("✓ StalenessManager initialized");
+    }
+
     // Initialize SupplyManager (only if asset_mapper_locked exists)
     let supply_manager = if let Some(ref asset_mapper_arc) = asset_mapper_locked {
         let mut mgr = supply::SupplyManager::new(asset_mapper_arc.clone());
