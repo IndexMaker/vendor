@@ -1,10 +1,11 @@
+use alloy_primitives::Address;
 use chrono::Utc;
 use clap::Parser;
 use common::amount::Amount;
 use config::VendorConfig;
 use eyre::Result;
 use market_data::{BitgetSubscriber, BitgetSubscriberConfig, MarketDataEvent, MarketDataObserver, Subscription};
-use onchain::{AssetMapper, IndexMapper, OnchainSubmitter, OnchainSubmitterConfig, PriceTracker};
+use onchain::{AssetMapper, PriceTracker};
 use parking_lot::RwLock as AtomicLock;
 use parking_lot::lock_api::RwLock;
 use std::{path::PathBuf, sync::Arc};
@@ -18,22 +19,14 @@ use alloy::{
     signers::local::PrivateKeySigner,
 };
 
-mod basket;
 mod config;
 mod market_data;
 mod onchain;
-mod inventory;
-mod api;
 mod order_sender;
 mod margin;
 mod supply;
 mod rebalance;
 
-use basket::BasketManager;
-use inventory::InventoryManager;
-use api::ApiServer;
-
-use crate::inventory::{Order, OrderSide};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -127,52 +120,30 @@ async fn main() -> Result<()> {
 
     tracing::info!("Margin config: min_order=${}, total_exposure=${}", min_order, total_exp);
 
-    // Load basket manager if config path provided
-    let (symbols, basket_manager, asset_mapper, index_mapper, asset_mapper_locked) = if let Some(config_path) = &cli.config_path {
+    // Load asset mapper and symbols
+    let (symbols, asset_mapper_locked) = if let Some(config_path) = &cli.config_path {
         tracing::info!("Loading configuration from: {}", config_path);
-
-        // Load basket manager
-        let basket_manager = BasketManager::load_from_config(config_path).await?;
-        tracing::info!("{}", basket_manager.summary());
 
         // Load asset mapper
         let asset_path = PathBuf::from(config_path).join("assets.json");
         let asset_mapper_raw = AssetMapper::load_from_file(&asset_path).await?;
-        let asset_mapper = Arc::new(asset_mapper_raw);  // For OnchainSubmitter
-        let asset_mapper_locked = Arc::new(parking_lot::RwLock::new(asset_mapper.as_ref().clone()));  // For SupplyManager
+        let asset_mapper = Arc::new(asset_mapper_raw);
+        let asset_mapper_locked = Arc::new(parking_lot::RwLock::new(asset_mapper.as_ref().clone()));
 
-        // Load index mapper
-        let index_path = PathBuf::from(config_path).join("index_ids.json");
-        let index_mapper_raw = IndexMapper::load_from_file(&index_path).await?;
-        let index_mapper = Arc::new(index_mapper_raw);  // For OnchainSubmitter
-        let index_mapper_locked = Arc::new(parking_lot::RwLock::new(index_mapper.as_ref()));  // For validation
+        // Get symbols from asset mapper
+        let symbols = asset_mapper.get_all_symbols();
 
-        // Get symbols
-        let symbols = basket_manager.get_all_unique_symbols();
+        tracing::info!("Loaded {} assets from config", symbols.len());
+        tracing::info!("Asset symbols: {:?}", symbols);
 
-        // Validate all assets have IDs
-        asset_mapper_locked.read().validate_all_mapped(&symbols)?;
-        tracing::info!("✓ All assets have valid ID mappings");
-
-        // Validate all indices have IDs
-        let index_symbols = basket_manager.get_index_symbols();
-        index_mapper_locked.read().validate_all_indices(&index_symbols)?;
-        tracing::info!("✓ All indices have valid ID mappings");
-
-        tracing::info!("Index symbols: {:?}", index_symbols);
-        tracing::info!("Asset symbols to subscribe: {:?}", symbols);
-
-        // NOW wrap in Arc<RwLock> after validation
-        let basket_manager = Arc::new(RwLock::new(basket_manager));
-
-        (symbols, Some(basket_manager), Some(asset_mapper), Some(index_mapper), Some(asset_mapper_locked))
+        (symbols, Some(asset_mapper_locked))
     } else if !cli.symbols.is_empty() {
         tracing::info!("Using symbols from CLI: {:?}", cli.symbols);
-        (cli.symbols, None, None, None, None)
+        (cli.symbols, None)
     } else {
         let default_symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
         tracing::info!("Using default symbols: {:?}", default_symbols);
-        (default_symbols, None, None, None, None)
+        (default_symbols, None)
     };
 
     if symbols.is_empty() {
@@ -186,19 +157,41 @@ async fn main() -> Result<()> {
     // Create price tracker
     let price_tracker = Arc::new(PriceTracker::new());
 
-    // Initialize StalenessManager (only if asset_mapper exists)
+    // Initialize StalenessManager (only if asset_mapper exists and onchain enabled)
     let staleness_manager = if let Some(ref asset_mapper_arc) = asset_mapper_locked {
-        let mgr = onchain::StalenessManager::new(
-            config.staleness.clone(),
-            price_tracker.clone(),
-            asset_mapper_arc.clone(),
-        );
-        
-        Some(Arc::new(parking_lot::RwLock::new(mgr)))
+        // Check if we have RPC configuration for on-chain reading
+        if let Some(castle_address) = &config.blockchain.castle_address {
+            let castle_addr: Address = castle_address.parse()?;
+
+            // Create provider for reading on-chain data
+            let provider = ProviderBuilder::new()
+                .connect_http(config.blockchain.rpc_url.parse()?);
+
+            // Create OnchainReader
+            let onchain_reader = onchain::OnchainReader::new(
+                provider,
+                castle_addr,
+                config.blockchain.vendor_id,
+            );
+
+            // Create StalenessManager with reader
+            let mgr = onchain::StalenessManager::new(
+                config.staleness.clone(),
+                price_tracker.clone(),
+                asset_mapper_arc.clone(),
+                onchain_reader,
+            );
+
+            tracing::info!("✓ StalenessManager initialized with on-chain reading");
+            Some(Arc::new(parking_lot::RwLock::new(mgr)))
+        } else {
+            tracing::warn!("StalenessManager disabled (no castle_address in config)");
+            None
+        }
     } else {
         None
     };
-    
+
     if staleness_manager.is_some() {
         tracing::info!("✓ StalenessManager initialized");
     }
@@ -222,45 +215,13 @@ async fn main() -> Result<()> {
         tracing::info!("✓ SupplyManager initialized");
     }
 
-    // Create inventory manager (only if basket_manager exists)
-    let inventory = if let Some(ref bm) = basket_manager {
-        let inventory_path = PathBuf::from("./data/inventory_manager.json");
-        let inv = InventoryManager::load_from_storage(
-            bm.clone(),
-            price_tracker.clone(),
-            inventory_path,
-            order_sender.clone(),
-            supply_manager.clone(),
-        )
-        .await?;
+    // Inventory manager removed - Vendor is now asset-only
+    // Order execution will be handled by Keeper
+    tracing::info!("Vendor running in asset-only mode (no index tracking)");
 
-        tracing::info!("{}", inv.summary());
-
-        Some(Arc::new(tokio::sync::RwLock::new(inv)))
-    } else {
-        tracing::info!("No basket manager available, inventory manager disabled");
-        None
-    };
-
-    // Start API server if inventory is available
-    let api_server = if let Some(ref inv) = inventory {
-        let api_addr = format!("0.0.0.0:{}", cli.api_port).parse()?;
-        let server = ApiServer::new(inv.clone(), api_addr);
-        let cancel_token = server.cancel_token();
-
-        tokio::spawn(async move {
-            if let Err(e) = server.start().await {
-                tracing::error!("API server failed: {:?}", e);
-            }
-        });
-
-        tracing::info!("API server started on http://0.0.0.0:{}", cli.api_port);
-
-        Some(cancel_token)
-    } else {
-        tracing::info!("API server disabled (no inventory manager)");
-        None
-    };
+    // API server will be added later with /quote_assets endpoint
+    // For now, Vendor only processes market data
+    tracing::info!("API server disabled (will add /quote_assets endpoint next)");
 
     // Subscribe to market data events
     {
@@ -341,91 +302,9 @@ async fn main() -> Result<()> {
         })?;
     }
 
-    // Start onchain submitter if enabled
-    let onchain_submitter = if cli.enable_onchain {
-        if let (Some(basket_manager), Some(asset_mapper), Some(index_mapper)) =
-            (basket_manager, asset_mapper, index_mapper)
-        {
-            tracing::info!("Onchain submission enabled");
-
-            // Setup blockchain connection
-            let rpc_url = cli
-                .rpc_url
-                .unwrap_or_else(|| config.blockchain.rpc_url.clone());
-            let private_key = cli
-                .private_key
-                .ok_or_else(|| eyre::eyre!("Private key required for onchain submissions"))?;
-            let castle_address = cli
-                .castle_address
-                .ok_or_else(|| eyre::eyre!("Castle address required for onchain submissions"))?
-                .parse()?;
-
-            // Create signer and provider
-            let signer: PrivateKeySigner = private_key.parse()?;
-            let wallet = EthereumWallet::from(signer);
-            let provider = ProviderBuilder::new()
-                .with_gas_estimation()
-                .with_simple_nonce_management()
-                .wallet(wallet)
-                .connect_http(rpc_url.parse()?);
-
-            // Create submitter config
-            let submitter_config = OnchainSubmitterConfig {
-                vendor_id: 1,
-                castle_address,
-                submission_interval: Duration::from_secs(20),      // Market data every 20s
-                sync_check_interval: Duration::from_secs(300),     // Sync check every 5 min
-                default_liquidity: 0.5,
-                default_slope: 1.0,
-            };
-
-            // Create submitter
-            let submitter = OnchainSubmitter::new(
-                submitter_config,
-                provider,
-                asset_mapper,
-                index_mapper,
-                basket_manager,
-                price_tracker.clone(),
-            );
-
-            // Wrap in Arc for sharing between tasks
-            let submitter = Arc::new(submitter);
-
-            // Initialize (one-time setup)
-            tracing::info!("Initializing on-chain state...");
-            submitter.initialize().await?;
-
-            // Start periodic market data submissions
-            submitter.start().await?;  // No need for clone, just & reference
-            tracing::info!("Onchain submitter started (market data: 20s)");
-
-            // Spawn periodic sync task for new assets/indices
-            {
-                let submitter_for_sync = submitter.clone();
-                tokio::spawn(async move {
-                    let mut sync_interval = tokio::time::interval(Duration::from_secs(300)); // 5 minutes
-
-                    loop {
-                        sync_interval.tick().await;
-
-                        tracing::debug!("Running periodic sync check for new assets/indices");
-                        if let Err(e) = submitter_for_sync.sync_new_additions().await {
-                            tracing::error!("Periodic sync failed: {:?}", e);
-                        }
-                    }
-                });
-            }
-            tracing::info!("Periodic sync task started (every 5 minutes)");
-
-            Some(submitter)
-        } else {
-            tracing::warn!("Onchain submission enabled but no config path provided");
-            None
-        }
-    } else {
-        None
-    };
+    // Onchain submitter removed - Vendor only provides quotes
+    // Keeper will handle on-chain submissions
+    tracing::info!("On-chain submissions disabled (Keeper's responsibility)");
 
     // Keep running
     tracing::info!("Vendor running. Press Ctrl+C to stop.");
@@ -434,13 +313,7 @@ async fn main() -> Result<()> {
     // Cleanup
     tracing::info!("Shutting down...");
     bitget_subscriber.stop().await?;
-    if let Some(submitter) = onchain_submitter {
-        submitter.stop().await;
-    }
-
-    if let Some(api_cancel) = api_server {
-        api_cancel.cancel();
-    }
+    
 
     order_sender_config.stop().await?;
     tracing::info!("✓ OrderSender stopped");

@@ -32,6 +32,7 @@ pub struct BlockchainConfig {
     pub rpc_url: String,
     pub private_key: String,
     pub castle_address: Option<String>,
+    pub vendor_id: u128,
 }
 
 // Add this new struct
@@ -110,6 +111,7 @@ impl Default for VendorConfig {
                 rpc_url: "http://localhost:8547".to_string(),
                 private_key: String::new(),
                 castle_address: None,
+                vendor_id: 1,
             },
             margin: MarginConfig::default(),
             staleness: StalenessConfig::default(),

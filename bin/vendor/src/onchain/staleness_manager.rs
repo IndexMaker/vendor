@@ -1,6 +1,9 @@
+use crate::onchain::OnchainReader;
+
 use super::market_data_cache::{MarketDataCache, StalenessConfig};
 use super::price_tracker::PriceTracker;
 use super::AssetMapper;
+use alloy::providers::Provider;
 use common::amount::Amount;
 use eyre::Result;
 use parking_lot::RwLock;
@@ -14,59 +17,80 @@ use std::sync::Arc;
 /// 2. Compare with real-time data from PriceTracker
 /// 3. Identify stale assets based on thresholds
 /// 4. Prepare subset for Keeper submission
-pub struct StalenessManager {
+pub struct StalenessManager<P> {
     cache: MarketDataCache,
     price_tracker: Arc<PriceTracker>,
     asset_mapper: Arc<RwLock<AssetMapper>>,
+    onchain_reader: OnchainReader<P>,
+    
+    /// Track which assets we submitted and in what order
+    /// This matches the order returned by getMarketData()
+    submitted_asset_order: Vec<u128>,  // Asset IDs in submission order
 }
 
-impl StalenessManager {
+impl<P> StalenessManager<P>
+where
+    P: Provider + Clone,
+{
     pub fn new(
         config: StalenessConfig,
         price_tracker: Arc<PriceTracker>,
         asset_mapper: Arc<RwLock<AssetMapper>>,
+        onchain_reader: OnchainReader<P>,
     ) -> Self {
         Self {
             cache: MarketDataCache::new(config),
             price_tracker,
             asset_mapper,
+            onchain_reader,
+            submitted_asset_order: Vec::new(),
         }
+    }
+
+    /// Set the asset order (called after submitAssets)
+    pub fn set_submitted_asset_order(&mut self, asset_ids: Vec<u128>) {
+        self.submitted_asset_order = asset_ids;
+        tracing::info!("Set submitted asset order: {:?}", self.submitted_asset_order);
     }
     
     /// Update cache with on-chain market data
-    /// Called after fetching from IFactor::getMarketData()
-    pub fn update_onchain_cache(
-        &mut self,
-        asset_ids: Vec<u128>,
-        liquidity: Vec<Amount>,
-        prices: Vec<Amount>,
-        slopes: Vec<Amount>,
-    ) -> Result<()> {
-        if asset_ids.len() != liquidity.len() 
-            || asset_ids.len() != prices.len() 
-            || asset_ids.len() != slopes.len() 
-        {
+    /// Reads from chain and updates cache
+    pub async fn update_onchain_cache(&mut self) -> Result<()> {
+        // Read from chain
+        let (liquidity, prices, slopes) = self.onchain_reader.get_market_data().await?;
+        
+        // Verify lengths match
+        if liquidity.len() != prices.len() || liquidity.len() != slopes.len() {
             return Err(eyre::eyre!("Mismatched vector lengths in market data"));
+        }
+        
+        if liquidity.len() != self.submitted_asset_order.len() {
+            tracing::warn!(
+                "Market data length ({}) doesn't match submitted assets ({})",
+                liquidity.len(),
+                self.submitted_asset_order.len()
+            );
         }
         
         let mapper = self.asset_mapper.read();
         
-        for i in 0..asset_ids.len() {
-            let asset_id = asset_ids[i];
+        // Update cache using position-based matching
+        for i in 0..liquidity.len().min(self.submitted_asset_order.len()) {
+            let asset_id = self.submitted_asset_order[i];
             
-            // Find symbol for this asset_id
             if let Some(symbol) = mapper.get_symbol(asset_id) {
                 self.cache.update_from_onchain(
                     symbol.clone(),
                     asset_id,
                     liquidity[i],
                     prices[i],
-                    slopes[i],
+                    slopes[i],  // Now we have slopes!
                 );
                 
                 tracing::debug!(
-                    "Cached on-chain data for {}: L={}, P={}, S={}",
+                    "Cached on-chain data for {} ({}): L={}, P={}, S={}",
                     symbol,
+                    asset_id,
                     liquidity[i].to_u128_raw() as f64 / 1e18,
                     prices[i].to_u128_raw() as f64 / 1e18,
                     slopes[i].to_u128_raw() as f64 / 1e18
