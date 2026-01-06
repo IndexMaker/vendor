@@ -10,7 +10,7 @@ alloy = {workspace = true}
 clap = { workspace = true, features = ["derive"] }
 chrono = { workspace = true }
 common = { workspace = true, features = [
-    "vec-u128",
+    "vec-u128", "vec-u8"
 ]}
 eyre = { workspace = true }
 ethers = { workspace = true }

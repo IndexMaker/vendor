@@ -9,6 +9,9 @@ mod index;
 mod vendor;
 mod accumulator;
 mod processor;
+mod onchain;
+
+use onchain::{GasConfig, OnchainSubmitter, SubmitterConfig};
 
 use processor::{ProcessorConfig, QuoteProcessor};
 use accumulator::{AccumulatorConfig, IndexOrder, OrderAccumulator, OrderAction};
@@ -151,8 +154,37 @@ async fn main() -> Result<()> {
     
     tracing::info!("✓ Quote processor initialized");
     
-    // Create and test order accumulator with processor integration
-    tracing::info!("\nTesting Order Accumulator + Quote Processor Integration...");
+    tracing::info!("\nInitializing On-chain Submitter...");
+    
+    let submitter_config = SubmitterConfig {
+        rpc_url: config.blockchain.rpc_url.clone(),
+        castle_address: config.blockchain.castle_address.parse()?,
+        vendor_id: config.blockchain.vendor_id,
+        private_key: std::env::var("PRIVATE_KEY").ok(),
+        dry_run: config.blockchain.dry_run,
+        gas_config: GasConfig::default(),
+        retry_attempts: 3,
+        retry_delay_ms: 1000,
+    };
+    
+    // Always create with provider, use dry_run flag to skip actual submission
+    use alloy::providers::ProviderBuilder;
+    
+    let provider = ProviderBuilder::new()
+        .connect_http(config.blockchain.rpc_url.parse()?);
+    
+    let submitter = Arc::new(OnchainSubmitter::new_with_provider(submitter_config, provider)?);
+    
+    if config.blockchain.dry_run {
+        tracing::info!("✓ On-chain submitter initialized (DRY RUN MODE)");
+    } else {
+        tracing::info!("✓ On-chain submitter initialized (LIVE MODE)");
+    }
+
+    // ========================================================================
+    // Full pipeline integration
+    // ========================================================================
+    tracing::info!("\nTesting Full Pipeline: Accumulator → Processor → Submitter");
     
     let accumulator_config = AccumulatorConfig {
         batch_window_ms: config.polling.batch_window_ms,
@@ -161,18 +193,22 @@ async fn main() -> Result<()> {
     
     let accumulator = Arc::new(OrderAccumulator::new(accumulator_config));
     
-    // Start processing with integrated callback
+    // Start processing with full pipeline
     let accumulator_clone = accumulator.clone();
     let processor_clone = quote_processor.clone();
+    let submitter_clone = submitter.clone();
     
     accumulator_clone.start_processing(move |batch| {
         tracing::info!("🔥 Batch ready for processing!");
         tracing::info!("  Indices: {}", batch.indices.len());
         tracing::info!("  Total orders: {}", batch.total_order_count());
         
-        // Process batch with quote processor
+        // Full pipeline: Process → Submit
         let processor = processor_clone.clone();
+        let submitter = submitter_clone.clone();
+        
         tokio::spawn(async move {
+            // Step 1: Process batch
             match processor.process_batch(batch).await {
                 Ok(payload) => {
                     let summary = processor.get_payload_summary(&payload);
@@ -186,33 +222,31 @@ async fn main() -> Result<()> {
                     );
                     tracing::info!("  Market data assets: {}", summary.market_data_assets);
                     
-                    // Log details of each buy order
-                    for buy_order in &payload.buy_orders {
-                        tracing::info!("\n  Index {} Buy Order:", buy_order.index_id);
-                        tracing::info!(
-                            "    Collateral added: ${:.2}",
-                            buy_order.collateral_added.to_u128_raw() as f64 / 1e18
-                        );
-                        tracing::info!(
-                            "    Collateral removed: ${:.2}",
-                            buy_order.collateral_removed.to_u128_raw() as f64 / 1e18
-                        );
-                        tracing::info!(
-                            "    Net change: ${:.2}",
-                            buy_order.net_collateral_change().to_u128_raw() as f64 / 1e18
-                        );
-                        tracing::info!(
-                            "    Max order size: ${:.2}",
-                            buy_order.max_order_size.to_u128_raw() as f64 / 1e18
-                        );
-                        tracing::info!("    Asset allocations:");
-                        for alloc in &buy_order.asset_allocations {
-                            tracing::info!(
-                                "      Asset {}: qty={:.8}, value=${:.2}",
-                                alloc.asset_id,
-                                alloc.quantity.to_u128_raw() as f64 / 1e18,
-                                alloc.target_value_usd.to_u128_raw() as f64 / 1e18
-                            );
+                    // Step 2: Submit to blockchain
+                    match submitter.submit_payload(payload).await {
+                        Ok(result) => {
+                            match result {
+                                onchain::SubmissionResult::Success { market_data_tx, buy_order_txs } => {
+                                    tracing::info!("\n✅ On-chain Submission Successful!");
+                                    if let Some(tx) = market_data_tx {
+                                        tracing::info!("  Market data tx: {}", tx.tx_hash);
+                                    }
+                                    for (index_id, tx) in buy_order_txs {
+                                        tracing::info!("  Buy order {} tx: {}", index_id, tx.tx_hash);
+                                    }
+                                }
+                                onchain::SubmissionResult::DryRun { would_submit } => {
+                                    tracing::info!("\n🔍 Dry Run Complete");
+                                    tracing::info!("  Would submit {} assets", would_submit.market_data_assets);
+                                    tracing::info!("  Would submit {} orders", would_submit.buy_orders_count);
+                                }
+                                onchain::SubmissionResult::Failed { error } => {
+                                    tracing::error!("\n❌ Submission Failed: {}", error);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Submission error: {:?}", e);
                         }
                     }
                 }
@@ -223,7 +257,7 @@ async fn main() -> Result<()> {
         });
     }).await;
     
-    tracing::info!("✓ Accumulator + Processor integration started");
+    tracing::info!("✓ Full pipeline started (Accumulator → Processor → Submitter)");
     
     // Submit test orders
     tracing::info!("\nSubmitting test orders...");
@@ -255,21 +289,22 @@ async fn main() -> Result<()> {
         tracing::info!("  ✓ Submitted 2 orders for index {}", index_id);
     }
     
-    // Wait for batch processing
-    tracing::info!("\nWaiting for batch processing...");
-    tokio::time::sleep(tokio::time::Duration::from_millis(config.polling.batch_window_ms + 500)).await;
+    // Wait for full pipeline processing
+    tracing::info!("\nWaiting for full pipeline processing...");
+    tokio::time::sleep(tokio::time::Duration::from_millis(config.polling.batch_window_ms + 1000)).await;
     
-    tracing::info!("\n✅ Phase 4.4 Complete!");
-    tracing::info!("Quote Processor:");
-    tracing::info!("  ✓ Vendor quote fetching");
-    tracing::info!("  ✓ Market data snapshot building");
-    tracing::info!("  ✓ Asset allocation calculation");
-    tracing::info!("  ✓ Buy order generation");
-    tracing::info!("  ✓ Integration with accumulator");
+    tracing::info!("\n✅ Phase 4.5 Complete!");
+    tracing::info!("On-chain Submitter:");
+    tracing::info!("  ✓ Blockchain connection ({})", 
+        if config.blockchain.dry_run { "dry-run" } else { "live" });
+    tracing::info!("  ✓ IFactor::submitMarketData() integration");
+    tracing::info!("  ✓ IFactor::submitBuyOrder() integration");
+    tracing::info!("  ✓ Transaction retry logic");
+    tracing::info!("  ✓ Gas management");
+    tracing::info!("  ✓ Full pipeline: Accumulator → Processor → Submitter");
     
-    tracing::info!("\nNext phases:");
-    tracing::info!("  - Phase 4.5: On-chain Submitter");
-    tracing::info!("  - Phase 4.6: Main Event Loop");
+    tracing::info!("\nNext phase:");
+    tracing::info!("  - Phase 4.6: Main Event Loop & Production Mode");
 
     Ok(())
 }
