@@ -1,0 +1,22 @@
+[
+  {
+    "index_id": 1001,
+    "name": "Crypto Top 5",
+    "assets": [
+      { "asset_id": 101, "weight": 0.4 },
+      { "asset_id": 102, "weight": 0.3 },
+      { "asset_id": 103, "weight": 0.2 },
+      { "asset_id": 104, "weight": 0.05 },
+      { "asset_id": 105, "weight": 0.05 }
+    ]
+  },
+  {
+    "index_id": 1002,
+    "name": "DeFi Index",
+    "assets": [
+      { "asset_id": 106, "weight": 0.5 },
+      { "asset_id": 107, "weight": 0.3 },
+      { "asset_id": 108, "weight": 0.2 }
+    ]
+  }
+]

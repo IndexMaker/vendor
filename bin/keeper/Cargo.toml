@@ -4,13 +4,57 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+alloy-primitives = { workspace = true }
+alloy-sol-types = { workspace = true }
+alloy = {workspace = true}
 clap = { workspace = true, features = ["derive"] }
+chrono = { workspace = true }
+common = { workspace = true, features = [
+    "vec-u128",
+]}
 eyre = { workspace = true }
-tokio = { workspace = true }
+ethers = { workspace = true }
+futures = { workspace = true }
+itertools = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+amount-macros = { workspace = true }
+abacus-macros = { workspace = true }
+labels-macros = { workspace = true }
+serde = { workspace = true }
+vector-macros = { workspace = true }
+
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# WebSocket
+tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
+futures-util = "0.3"
+
+# Serialization
+serde_json = "1.0"
+
+
+# Utilities
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-reqwest = { workspace = true, features = ["json"] }
-serde = { workspace = true }
-serde_json = "1.0"
-rand = "0.9"
-chrono = { workspace = true }
+parking_lot = "0.12"
+crc32fast = "1.4"
+
+
+# API Server
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+
+async-trait = "0.1"
+derive_builder = { workspace = true }
+rand = { workspace = true }
+
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
+sha256 = "1.5"
+
+
+[dev-dependencies]
+dotenv = "0.15"

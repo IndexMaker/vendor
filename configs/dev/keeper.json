@@ -1,0 +1,18 @@
+{
+  "keeper_id": 1,
+  "vendor": {
+    "url": "http://localhost:8080",
+    "timeout_secs": 10,
+    "retry_attempts": 3
+  },
+  "blockchain": {
+    "rpc_url": "http://localhost:8545",
+    "castle_address": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+    "vendor_id": 1,
+    "dry_run": true
+  },
+  "polling": {
+    "interval_secs": 5,
+    "batch_window_ms": 500
+  }
+}

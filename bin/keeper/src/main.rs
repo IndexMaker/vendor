@@ -1,51 +1,22 @@
 use clap::Parser;
 use eyre::Result;
+use std::path::PathBuf;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod client;
-mod simulation;
+mod config;
+mod index;
+mod vendor;
 
-use client::VendorClient;
-use simulation::{OrderSimulator, SimulationConfig};
+use config::KeeperConfig;
+use index::IndexMapper;
+use vendor::{QuoteCache, VendorClient};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    /// Vendor base URL
-    #[arg(long, default_value = "http://localhost:8080")]
-    vendor_url: String,
-
-    /// Indices to trade (comma-separated)
-    #[arg(long, value_delimiter = ',')]
-    indices: Option<Vec<String>>,
-
-    /// Minimum collateral in USD
-    #[arg(long, default_value = "100.0")]
-    min_collateral: f64,
-
-    /// Maximum collateral in USD
-    #[arg(long, default_value = "5000.0")]
-    max_collateral: f64,
-
-    /// Minimum interval between orders (seconds)
-    #[arg(long, default_value = "10")]
-    min_interval: u64,
-
-    /// Maximum interval between orders (seconds)
-    #[arg(long, default_value = "30")]
-    max_interval: u64,
-
-    /// Client ID prefix
-    #[arg(long, default_value = "keeper-sim")]
-    client_id_prefix: String,
-
-    /// Check vendor health and exit
-    #[arg(long)]
-    health_check: bool,
-
-    /// Get inventory and exit
-    #[arg(long)]
-    get_inventory: bool,
+    /// Path to configuration directory
+    #[arg(long, default_value = "./configs/dev")]
+    config_path: String,
 
     /// Log level (trace, debug, info, warn, error)
     #[arg(short, long, default_value = "info")]
@@ -66,75 +37,109 @@ async fn main() -> Result<()> {
         .init();
 
     tracing::info!("Starting VaultWorks Keeper");
-    tracing::info!("Vendor URL: {}", cli.vendor_url);
 
-    // Create vendor client
-    let vendor_client = VendorClient::new(cli.vendor_url.clone());
+    // Load configuration
+    let config_dir = PathBuf::from(&cli.config_path);
+    let keeper_config_path = config_dir.join("keeper.json");
+    let indices_config_path = config_dir.join("indices.json");
 
-    // Health check mode
-    if cli.health_check {
-        tracing::info!("Running health check...");
-        match vendor_client.health_check().await {
-            Ok(health) => {
-                tracing::info!("✅ Vendor is healthy");
-                tracing::info!("Status: {}", health.status);
-                tracing::info!("Version: {}", health.version);
-                tracing::info!("Timestamp: {}", health.timestamp);
-                return Ok(());
-            }
-            Err(e) => {
-                tracing::error!("❌ Health check failed: {:?}", e);
-                return Err(e);
-            }
-        }
-    }
-
-    // Get inventory mode
-    if cli.get_inventory {
-        tracing::info!("Fetching inventory...");
-        match vendor_client.get_inventory().await {
-            Ok(inventory) => {
-                tracing::info!("✅ Inventory retrieved");
-                println!("{}", serde_json::to_string_pretty(&inventory)?);
-                return Ok(());
-            }
-            Err(e) => {
-                tracing::error!("❌ Failed to fetch inventory: {:?}", e);
-                return Err(e);
-            }
-        }
-    }
-
-    // Simulation mode (default)
-    let indices = cli.indices.unwrap_or_else(|| vec!["SY100".to_string()]);
-
-    let config = SimulationConfig {
-        indices,
-        min_collateral_usd: cli.min_collateral,  // Changed
-        max_collateral_usd: cli.max_collateral,  // Changed
-        min_interval_secs: cli.min_interval,
-        max_interval_secs: cli.max_interval,
-        client_id_prefix: cli.client_id_prefix,
+    let config = if keeper_config_path.exists() {
+        KeeperConfig::load_from_file(&keeper_config_path).await?
+    } else {
+        tracing::warn!("keeper.json not found, using defaults");
+        KeeperConfig::default()
     };
 
-    let mut simulator = OrderSimulator::new(config, vendor_client);
+    tracing::info!("✓ Configuration loaded");
+    tracing::info!("  Keeper ID: {}", config.keeper_id);
+    tracing::info!("  Vendor URL: {}", config.vendor.url);
+    tracing::info!("  Polling interval: {}s", config.polling.interval_secs);
 
-    // Run simulation
-    tracing::info!("Starting order simulation mode");
-    tracing::info!("Press Ctrl+C to stop");
+    // Load index mapper
+    let index_mapper = if indices_config_path.exists() {
+        IndexMapper::load_from_file(&indices_config_path).await?
+    } else {
+        tracing::warn!("indices.json not found, using empty mapper");
+        IndexMapper::new()
+    };
 
-    tokio::select! {
-        result = simulator.run() => {
-            if let Err(e) = result {
-                tracing::error!("Simulation failed: {:?}", e);
-                return Err(e);
-            }
-        }
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("Received Ctrl+C, shutting down...");
+    tracing::info!("✓ Loaded {} indices", index_mapper.len());
+    for index_id in index_mapper.get_all_index_ids() {
+        if let Some(index) = index_mapper.get_index(index_id) {
+            tracing::info!(
+                "  Index {}: {} ({} assets)",
+                index_id,
+                index.name,
+                index.assets.len()
+            );
         }
     }
 
-    tracing::info!("Keeper stopped");
+    // Create vendor client
+    let vendor_client = VendorClient::new(
+        config.vendor.url.clone(),
+        config.vendor.timeout_secs,
+        config.vendor.retry_attempts,
+    );
+
+    // Create quote cache (5 second TTL)
+    let quote_cache = QuoteCache::new(5);
+
+    // Test vendor connection
+    tracing::info!("Testing vendor connection...");
+    match vendor_client.health_check().await {
+        Ok(health) => {
+            tracing::info!("✓ Vendor connection successful");
+            tracing::info!("  Status: {}", health.status);
+            tracing::info!("  Vendor ID: {}", health.vendor_id);
+            tracing::info!("  Tracked Assets: {}", health.tracked_assets);
+        }
+        Err(e) => {
+            tracing::error!("✗ Vendor connection failed: {:?}", e);
+            tracing::warn!("Keeper will continue but may not function correctly");
+        }
+    }
+
+    // Test quote request
+    let all_assets = index_mapper.get_all_asset_ids();
+    if !all_assets.is_empty() {
+        tracing::info!("Testing quote request for {} assets...", all_assets.len());
+        
+        match vendor_client.quote_assets(all_assets.clone()).await {
+            Ok(quote) => {
+                tracing::info!("✓ Quote request successful");
+                tracing::info!("  Requested: {} assets", all_assets.len());
+                tracing::info!("  Stale: {} assets", quote.len());
+                
+                if !quote.is_empty() {
+                    tracing::info!("  Sample data:");
+                    for i in 0..quote.len().min(3) {
+                        tracing::info!(
+                            "    Asset {}: L={:.2}, P=${:.2}, S={:.6}",
+                            quote.assets[i],
+                            quote.liquidity[i],
+                            quote.prices[i],
+                            quote.slopes[i]
+                        );
+                    }
+                    
+                    // Store in cache
+                    quote_cache.put(all_assets, quote);
+                    tracing::info!("  ✓ Quote cached");
+                }
+            }
+            Err(e) => {
+                tracing::error!("✗ Quote request failed: {:?}", e);
+            }
+        }
+    }
+
+    tracing::info!("\nKeeper foundation initialized successfully!");
+    tracing::info!("Next phases:");
+    tracing::info!("  - Phase 4.3: Order Accumulator");
+    tracing::info!("  - Phase 4.4: Quote Processor");
+    tracing::info!("  - Phase 4.5: On-chain Submitter");
+    tracing::info!("  - Phase 4.6: Main Event Loop");
+
     Ok(())
 }
