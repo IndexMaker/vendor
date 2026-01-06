@@ -25,7 +25,7 @@ impl Default for ProcessorConfig {
 pub struct QuoteProcessor {
     config: ProcessorConfig,
     pub(crate) index_mapper: Arc<IndexMapper>,
-    vendor_client: Arc<VendorClient>,
+    pub(crate) vendor_client: Arc<VendorClient>,
 }
 
 impl QuoteProcessor {

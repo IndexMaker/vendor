@@ -10,14 +10,15 @@ mod vendor;
 mod accumulator;
 mod processor;
 mod onchain;
+mod keeper;  // NEW: Add keeper module
 
 use onchain::{GasConfig, OnchainSubmitter, SubmitterConfig};
-
 use processor::{ProcessorConfig, QuoteProcessor};
 use accumulator::{AccumulatorConfig, IndexOrder, OrderAccumulator, OrderAction};
 use config::KeeperConfig;
 use index::IndexMapper;
 use vendor::{QuoteCache, VendorClient};
+use keeper::{KeeperLoop, KeeperLoopConfig};  // NEW: Import keeper types
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -29,6 +30,10 @@ struct Cli {
     /// Log level (trace, debug, info, warn, error)
     #[arg(short, long, default_value = "info")]
     log_level: String,
+
+    /// Run in test mode (submit test orders and exit)
+    #[arg(long)]
+    test_mode: bool,  // NEW: Add test mode flag
 }
 
 #[tokio::main]
@@ -44,7 +49,7 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    tracing::info!("Starting VaultWorks Keeper");
+    tracing::info!("🏰 Starting VaultWorks Keeper");  // CHANGED: Added emoji
 
     // Load configuration
     let config_dir = PathBuf::from(&cli.config_path);
@@ -184,7 +189,7 @@ async fn main() -> Result<()> {
     // ========================================================================
     // Full pipeline integration
     // ========================================================================
-    tracing::info!("\nTesting Full Pipeline: Accumulator → Processor → Submitter");
+    tracing::info!("\nInitializing Full Pipeline: Accumulator → Processor → Submitter");
     
     let accumulator_config = AccumulatorConfig {
         batch_window_ms: config.polling.batch_window_ms,
@@ -258,53 +263,93 @@ async fn main() -> Result<()> {
     }).await;
     
     tracing::info!("✓ Full pipeline started (Accumulator → Processor → Submitter)");
-    
-    // Submit test orders
-    tracing::info!("\nSubmitting test orders...");
-    
-    let test_index_ids = quote_processor.index_mapper.get_all_index_ids();
-    
-    for index_id in test_index_ids.iter().take(2) {
-        let order1 = IndexOrder {
-            index_id: *index_id,
-            action: OrderAction::Deposit {
-                user_address: "0xUser1".to_string(),
-                amount_usd: Amount::from_u128_with_scale(1000, 0), // $1000
-            },
-            timestamp: chrono::Utc::now(),
-        };
-        
-        let order2 = IndexOrder {
-            index_id: *index_id,
-            action: OrderAction::Deposit {
-                user_address: "0xUser2".to_string(),
-                amount_usd: Amount::from_u128_with_scale(500, 0), // $500
-            },
-            timestamp: chrono::Utc::now(),
-        };
-        
-        accumulator.submit_order(order1)?;
-        accumulator.submit_order(order2)?;
-        
-        tracing::info!("  ✓ Submitted 2 orders for index {}", index_id);
-    }
-    
-    // Wait for full pipeline processing
-    tracing::info!("\nWaiting for full pipeline processing...");
-    tokio::time::sleep(tokio::time::Duration::from_millis(config.polling.batch_window_ms + 1000)).await;
-    
-    tracing::info!("\n✅ Phase 4.5 Complete!");
-    tracing::info!("On-chain Submitter:");
-    tracing::info!("  ✓ Blockchain connection ({})", 
-        if config.blockchain.dry_run { "dry-run" } else { "live" });
-    tracing::info!("  ✓ IFactor::submitMarketData() integration");
-    tracing::info!("  ✓ IFactor::submitBuyOrder() integration");
-    tracing::info!("  ✓ Transaction retry logic");
-    tracing::info!("  ✓ Gas management");
-    tracing::info!("  ✓ Full pipeline: Accumulator → Processor → Submitter");
-    
-    tracing::info!("\nNext phase:");
-    tracing::info!("  - Phase 4.6: Main Event Loop & Production Mode");
 
+    // ========================================================================
+    // NEW: Phase 4.6 - Main Keeper Loop or Test Mode
+    // ========================================================================
+    
+    if cli.test_mode {
+        // Test mode: Submit test orders and exit
+        tracing::info!("\n🧪 Running in TEST MODE");
+        
+        tracing::info!("Submitting test orders...");
+        let test_index_ids = quote_processor.index_mapper.get_all_index_ids();
+        
+        for index_id in test_index_ids.iter().take(2) {
+            let order1 = IndexOrder {
+                index_id: *index_id,
+                action: OrderAction::Deposit {
+                    user_address: "0xUser1".to_string(),
+                    amount_usd: Amount::from_u128_with_scale(1000, 0),
+                },
+                timestamp: chrono::Utc::now(),
+            };
+            
+            let order2 = IndexOrder {
+                index_id: *index_id,
+                action: OrderAction::Deposit {
+                    user_address: "0xUser2".to_string(),
+                    amount_usd: Amount::from_u128_with_scale(500, 0),
+                },
+                timestamp: chrono::Utc::now(),
+            };
+            
+            accumulator.submit_order(order1)?;
+            accumulator.submit_order(order2)?;
+            
+            tracing::info!("  ✓ Submitted 2 orders for index {}", index_id);
+        }
+        
+        tracing::info!("Waiting for batch processing...");
+        tokio::time::sleep(tokio::time::Duration::from_millis(config.polling.batch_window_ms + 1000)).await;
+        
+        tracing::info!("\n✅ Test mode complete");
+    } else {
+        // Production mode: Run main keeper loop
+        tracing::info!("\n🚀 Running in PRODUCTION MODE");
+        
+        // Create main keeper loop
+        let keeper_loop_config = KeeperLoopConfig {
+            polling_interval_secs: config.polling.interval_secs,
+            health_check_interval_secs: 30,
+        };
+
+        let keeper_loop = Arc::new(KeeperLoop::new(
+            accumulator.clone(),
+            quote_processor.clone(),
+            submitter.clone(),
+            keeper_loop_config,
+        ));
+
+        let cancel_token = keeper_loop.cancel_token();
+
+        // Spawn the keeper loop
+        let keeper_handle = {
+            let keeper_loop = keeper_loop.clone();
+            tokio::spawn(async move {
+                if let Err(e) = keeper_loop.run().await {
+                    tracing::error!("Keeper loop error: {:?}", e);
+                }
+            })
+        };
+
+        tracing::info!("✅ Keeper is running!");
+        tracing::info!("  - Accumulator: active");
+        tracing::info!("  - Processor: active");
+        tracing::info!("  - Submitter: active");
+        tracing::info!("  - Main loop: active");
+        tracing::info!("\nPress Ctrl+C to stop gracefully...");
+
+        // Wait for shutdown signal
+        tokio::signal::ctrl_c().await?;
+        
+        tracing::info!("\n🛑 Shutdown signal received");
+        cancel_token.cancel();
+        
+        // Wait for keeper loop to finish
+        let _ = keeper_handle.await;
+    }
+
+    tracing::info!("✅ Keeper stopped cleanly");
     Ok(())
 }
