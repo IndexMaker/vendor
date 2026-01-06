@@ -8,7 +8,9 @@ mod config;
 mod index;
 mod vendor;
 mod accumulator;
+mod processor;
 
+use processor::{ProcessorConfig, QuoteProcessor};
 use accumulator::{AccumulatorConfig, IndexOrder, OrderAccumulator, OrderAction};
 use config::KeeperConfig;
 use index::IndexMapper;
@@ -86,7 +88,7 @@ async fn main() -> Result<()> {
     );
 
     // Create quote cache (5 second TTL)
-    let quote_cache = QuoteCache::new(5);
+    let _quote_cache = QuoteCache::new(5);
 
     // Test vendor connection
     tracing::info!("Testing vendor connection...");
@@ -125,10 +127,6 @@ async fn main() -> Result<()> {
                             quote.slopes[i]
                         );
                     }
-                    
-                    // Store in cache
-                    quote_cache.put(all_assets, quote);
-                    tracing::info!("  ✓ Quote cached");
                 }
             }
             Err(e) => {
@@ -137,8 +135,24 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Create and test order accumulator
-    tracing::info!("\nTesting Order Accumulator...");
+    // Create quote processor
+    tracing::info!("\nInitializing Quote Processor...");
+    
+    let processor_config = ProcessorConfig {
+        vendor_id: config.blockchain.vendor_id,
+        max_order_size_multiplier: 2.0,
+    };
+    
+    let quote_processor = Arc::new(QuoteProcessor::new(
+        processor_config,
+        Arc::new(index_mapper),
+        Arc::new(vendor_client),
+    ));
+    
+    tracing::info!("✓ Quote processor initialized");
+    
+    // Create and test order accumulator with processor integration
+    tracing::info!("\nTesting Order Accumulator + Quote Processor Integration...");
     
     let accumulator_config = AccumulatorConfig {
         batch_window_ms: config.polling.batch_window_ms,
@@ -147,30 +161,76 @@ async fn main() -> Result<()> {
     
     let accumulator = Arc::new(OrderAccumulator::new(accumulator_config));
     
-    // Start processing with a callback
+    // Start processing with integrated callback
     let accumulator_clone = accumulator.clone();
-    accumulator_clone.start_processing(|batch| {
+    let processor_clone = quote_processor.clone();
+    
+    accumulator_clone.start_processing(move |batch| {
         tracing::info!("🔥 Batch ready for processing!");
         tracing::info!("  Indices: {}", batch.indices.len());
         tracing::info!("  Total orders: {}", batch.total_order_count());
         
-        for (index_id, state) in &batch.indices {
-            let net_change = state.net_collateral_change.to_u128_raw() as f64 / 1e18;
-            tracing::info!(
-                "  Index {}: {} orders, net change: ${:.2}",
-                index_id,
-                state.order_count,
-                net_change
-            );
-        }
+        // Process batch with quote processor
+        let processor = processor_clone.clone();
+        tokio::spawn(async move {
+            match processor.process_batch(batch).await {
+                Ok(payload) => {
+                    let summary = processor.get_payload_summary(&payload);
+                    
+                    tracing::info!("📊 Submission Payload Generated:");
+                    tracing::info!("  Buy orders: {}", summary.index_count);
+                    tracing::info!("  Unique assets: {}", summary.unique_assets);
+                    tracing::info!(
+                        "  Total collateral: ${:.2}",
+                        summary.total_collateral_usd.to_u128_raw() as f64 / 1e18
+                    );
+                    tracing::info!("  Market data assets: {}", summary.market_data_assets);
+                    
+                    // Log details of each buy order
+                    for buy_order in &payload.buy_orders {
+                        tracing::info!("\n  Index {} Buy Order:", buy_order.index_id);
+                        tracing::info!(
+                            "    Collateral added: ${:.2}",
+                            buy_order.collateral_added.to_u128_raw() as f64 / 1e18
+                        );
+                        tracing::info!(
+                            "    Collateral removed: ${:.2}",
+                            buy_order.collateral_removed.to_u128_raw() as f64 / 1e18
+                        );
+                        tracing::info!(
+                            "    Net change: ${:.2}",
+                            buy_order.net_collateral_change().to_u128_raw() as f64 / 1e18
+                        );
+                        tracing::info!(
+                            "    Max order size: ${:.2}",
+                            buy_order.max_order_size.to_u128_raw() as f64 / 1e18
+                        );
+                        tracing::info!("    Asset allocations:");
+                        for alloc in &buy_order.asset_allocations {
+                            tracing::info!(
+                                "      Asset {}: qty={:.8}, value=${:.2}",
+                                alloc.asset_id,
+                                alloc.quantity.to_u128_raw() as f64 / 1e18,
+                                alloc.target_value_usd.to_u128_raw() as f64 / 1e18
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to process batch: {:?}", e);
+                }
+            }
+        });
     }).await;
     
-    tracing::info!("✓ Order accumulator started");
+    tracing::info!("✓ Accumulator + Processor integration started");
     
     // Submit test orders
     tracing::info!("\nSubmitting test orders...");
     
-    for index_id in index_mapper.get_all_index_ids().iter().take(2) {
+    let test_index_ids = quote_processor.index_mapper.get_all_index_ids();
+    
+    for index_id in test_index_ids.iter().take(2) {
         let order1 = IndexOrder {
             index_id: *index_id,
             action: OrderAction::Deposit {
@@ -195,38 +255,19 @@ async fn main() -> Result<()> {
         tracing::info!("  ✓ Submitted 2 orders for index {}", index_id);
     }
     
-    // Wait for batch window to expire
-    tracing::info!("\nWaiting {}ms for batch window...", config.polling.batch_window_ms);
-    tokio::time::sleep(tokio::time::Duration::from_millis(config.polling.batch_window_ms + 100)).await;
+    // Wait for batch processing
+    tracing::info!("\nWaiting for batch processing...");
+    tokio::time::sleep(tokio::time::Duration::from_millis(config.polling.batch_window_ms + 500)).await;
     
-    // Check stats
-    let stats = accumulator.get_stats();
-    tracing::info!("\nAccumulator stats:");
-    tracing::info!("  Active indices: {}", stats.active_indices);
-    tracing::info!("  Total orders: {}", stats.total_orders);
-    tracing::info!("  Oldest order age: {}ms", stats.oldest_order_age_ms);
-    tracing::info!("  Should flush: {}", stats.should_flush);
-    
-    // Manual flush if needed
-    if stats.should_flush {
-        if let Some(batch) = accumulator.flush_batch() {
-            tracing::info!("\n🔥 Manual flush triggered");
-            tracing::info!("  Flushed {} orders from {} indices", 
-                batch.total_order_count(), 
-                batch.indices.len()
-            );
-        }
-    }
-
-    tracing::info!("\n✅ Phase 4.3 Complete!");
-    tracing::info!("Order Accumulator:");
-    tracing::info!("  ✓ Order submission");
-    tracing::info!("  ✓ Batch aggregation by index");
-    tracing::info!("  ✓ Time-based flushing ({}ms window)", config.polling.batch_window_ms);
-    tracing::info!("  ✓ Net collateral tracking");
+    tracing::info!("\n✅ Phase 4.4 Complete!");
+    tracing::info!("Quote Processor:");
+    tracing::info!("  ✓ Vendor quote fetching");
+    tracing::info!("  ✓ Market data snapshot building");
+    tracing::info!("  ✓ Asset allocation calculation");
+    tracing::info!("  ✓ Buy order generation");
+    tracing::info!("  ✓ Integration with accumulator");
     
     tracing::info!("\nNext phases:");
-    tracing::info!("  - Phase 4.4: Quote Processor");
     tracing::info!("  - Phase 4.5: On-chain Submitter");
     tracing::info!("  - Phase 4.6: Main Event Loop");
 
