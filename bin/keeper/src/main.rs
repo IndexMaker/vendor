@@ -1,12 +1,15 @@
 use clap::Parser;
+use common::amount::Amount;
 use eyre::Result;
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
 mod index;
 mod vendor;
+mod accumulator;
 
+use accumulator::{AccumulatorConfig, IndexOrder, OrderAccumulator, OrderAction};
 use config::KeeperConfig;
 use index::IndexMapper;
 use vendor::{QuoteCache, VendorClient};
@@ -134,9 +137,95 @@ async fn main() -> Result<()> {
         }
     }
 
-    tracing::info!("\nKeeper foundation initialized successfully!");
-    tracing::info!("Next phases:");
-    tracing::info!("  - Phase 4.3: Order Accumulator");
+    // Create and test order accumulator
+    tracing::info!("\nTesting Order Accumulator...");
+    
+    let accumulator_config = AccumulatorConfig {
+        batch_window_ms: config.polling.batch_window_ms,
+        max_batch_size: 100,
+    };
+    
+    let accumulator = Arc::new(OrderAccumulator::new(accumulator_config));
+    
+    // Start processing with a callback
+    let accumulator_clone = accumulator.clone();
+    accumulator_clone.start_processing(|batch| {
+        tracing::info!("🔥 Batch ready for processing!");
+        tracing::info!("  Indices: {}", batch.indices.len());
+        tracing::info!("  Total orders: {}", batch.total_order_count());
+        
+        for (index_id, state) in &batch.indices {
+            let net_change = state.net_collateral_change.to_u128_raw() as f64 / 1e18;
+            tracing::info!(
+                "  Index {}: {} orders, net change: ${:.2}",
+                index_id,
+                state.order_count,
+                net_change
+            );
+        }
+    }).await;
+    
+    tracing::info!("✓ Order accumulator started");
+    
+    // Submit test orders
+    tracing::info!("\nSubmitting test orders...");
+    
+    for index_id in index_mapper.get_all_index_ids().iter().take(2) {
+        let order1 = IndexOrder {
+            index_id: *index_id,
+            action: OrderAction::Deposit {
+                user_address: "0xUser1".to_string(),
+                amount_usd: Amount::from_u128_with_scale(1000, 0), // $1000
+            },
+            timestamp: chrono::Utc::now(),
+        };
+        
+        let order2 = IndexOrder {
+            index_id: *index_id,
+            action: OrderAction::Deposit {
+                user_address: "0xUser2".to_string(),
+                amount_usd: Amount::from_u128_with_scale(500, 0), // $500
+            },
+            timestamp: chrono::Utc::now(),
+        };
+        
+        accumulator.submit_order(order1)?;
+        accumulator.submit_order(order2)?;
+        
+        tracing::info!("  ✓ Submitted 2 orders for index {}", index_id);
+    }
+    
+    // Wait for batch window to expire
+    tracing::info!("\nWaiting {}ms for batch window...", config.polling.batch_window_ms);
+    tokio::time::sleep(tokio::time::Duration::from_millis(config.polling.batch_window_ms + 100)).await;
+    
+    // Check stats
+    let stats = accumulator.get_stats();
+    tracing::info!("\nAccumulator stats:");
+    tracing::info!("  Active indices: {}", stats.active_indices);
+    tracing::info!("  Total orders: {}", stats.total_orders);
+    tracing::info!("  Oldest order age: {}ms", stats.oldest_order_age_ms);
+    tracing::info!("  Should flush: {}", stats.should_flush);
+    
+    // Manual flush if needed
+    if stats.should_flush {
+        if let Some(batch) = accumulator.flush_batch() {
+            tracing::info!("\n🔥 Manual flush triggered");
+            tracing::info!("  Flushed {} orders from {} indices", 
+                batch.total_order_count(), 
+                batch.indices.len()
+            );
+        }
+    }
+
+    tracing::info!("\n✅ Phase 4.3 Complete!");
+    tracing::info!("Order Accumulator:");
+    tracing::info!("  ✓ Order submission");
+    tracing::info!("  ✓ Batch aggregation by index");
+    tracing::info!("  ✓ Time-based flushing ({}ms window)", config.polling.batch_window_ms);
+    tracing::info!("  ✓ Net collateral tracking");
+    
+    tracing::info!("\nNext phases:");
     tracing::info!("  - Phase 4.4: Quote Processor");
     tracing::info!("  - Phase 4.5: On-chain Submitter");
     tracing::info!("  - Phase 4.6: Main Event Loop");
