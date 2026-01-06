@@ -337,8 +337,8 @@ async fn main() -> Result<()> {
 
         let app_state = AppState {
             vendor_id: config.blockchain.vendor_id,
-            asset_mapper: asset_mapper_arc.clone(),  // parking_lot::RwLock - matches now!
-            staleness_manager: staleness_mgr.clone(),  // parking_lot::RwLock - matches now!
+            asset_mapper: asset_mapper_arc.clone(),
+            staleness_manager: staleness_mgr.clone(),
             order_book_processor: ob_processor.clone(),
         };
 

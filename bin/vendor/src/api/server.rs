@@ -6,14 +6,20 @@ use axum::{
 use std::net::SocketAddr;
 use tokio_util::sync::CancellationToken;
 
-pub struct ApiServer {
-    state: AppState,
+pub struct ApiServer<P>
+where
+    P: alloy::providers::Provider + Clone,
+{
+    state: AppState<P>,
     addr: SocketAddr,
     cancel_token: CancellationToken,
 }
 
-impl ApiServer {
-    pub fn new(state: AppState, addr: SocketAddr) -> Self {
+impl<P> ApiServer<P>
+where
+    P: alloy::providers::Provider + Clone + Send + Sync + 'static,
+{
+    pub fn new(state: AppState<P>, addr: SocketAddr) -> Self {
         Self {
             state,
             addr,
@@ -27,8 +33,8 @@ impl ApiServer {
     
     pub async fn start(self) -> eyre::Result<()> {
         let app = Router::new()
-            .route("/health", get(health))
-            .route("/quote_assets", post(quote_assets))
+            .route("/health", get(health::<P>))
+            .route("/quote_assets", post(quote_assets::<P>))
             .with_state(self.state);
         
         tracing::info!("API server listening on {}", self.addr);

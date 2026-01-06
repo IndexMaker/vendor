@@ -10,37 +10,23 @@ use axum::{
 use parking_lot::RwLock;
 use std::sync::Arc;
 
-// This MUST match what ProviderBuilder::new().connect_http() returns in main.rs
-pub type ConcreteProvider = alloy::providers::fillers::FillProvider<
-    alloy::providers::fillers::JoinFill<
-        alloy::providers::Identity,
-        alloy::providers::fillers::JoinFill<
-            alloy::providers::fillers::GasFiller,
-            alloy::providers::fillers::JoinFill<
-                alloy::providers::fillers::BlobGasFiller,
-                alloy::providers::fillers::JoinFill<
-                    alloy::providers::fillers::NonceFiller,
-                    alloy::providers::fillers::ChainIdFiller,
-                >,
-            >,
-        >,
-    >,
-    alloy::providers::RootProvider<alloy::network::Ethereum>,
-    alloy::network::Ethereum,
->;
-
+/// Generic AppState - works with any Provider type
 #[derive(Clone)]
-pub struct AppState {
+pub struct AppState<P>
+where
+    P: alloy::providers::Provider + Clone,
+{
     pub vendor_id: u128,
     pub asset_mapper: Arc<RwLock<AssetMapper>>,
-    pub staleness_manager: Arc<RwLock<StalenessManager<ConcreteProvider>>>,
+    pub staleness_manager: Arc<RwLock<StalenessManager<P>>>,
     pub order_book_processor: Arc<OrderBookProcessor>,
 }
 
-
-/// Health check endpoint
-pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
-    // Use spawn_blocking for parking_lot lock
+/// Health check endpoint - generic over Provider
+pub async fn health<P>(State(state): State<AppState<P>>) -> impl IntoResponse
+where
+    P: alloy::providers::Provider + Clone + Send + Sync + 'static,
+{
     let result = tokio::task::spawn_blocking(move || {
         let tracked_assets = state.asset_mapper.read().get_all_symbols().len();
         
@@ -56,12 +42,14 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
     Json(result)
 }
 
-/// Main quote_assets endpoint
-pub async fn quote_assets(
-    State(state): State<AppState>,
+/// Main quote_assets endpoint - generic over Provider
+pub async fn quote_assets<P>(
+    State(state): State<AppState<P>>,
     Json(request): Json<QuoteAssetsRequest>,
-) -> Result<Json<AssetsQuote>, (StatusCode, Json<ErrorResponse>)> {
-    // Run everything in spawn_blocking since we use parking_lot locks
+) -> Result<Json<AssetsQuote>, (StatusCode, Json<ErrorResponse>)>
+where
+    P: alloy::providers::Provider + Clone + Send + Sync + 'static,
+{
     tokio::task::spawn_blocking(move || {
         quote_assets_sync(state, request)
     })
@@ -76,17 +64,16 @@ pub async fn quote_assets(
     })?
 }
 
-// Synchronous implementation
-fn quote_assets_sync(
-    state: AppState,
+// Synchronous implementation - generic over Provider
+fn quote_assets_sync<P>(
+    state: AppState<P>,
     request: QuoteAssetsRequest,
-) -> Result<Json<AssetsQuote>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<AssetsQuote>, (StatusCode, Json<ErrorResponse>)>
+where
+    P: alloy::providers::Provider + Clone,
+{
     tracing::info!("Received quote request for {} assets", request.assets.len());
     tracing::debug!("Requested assets: {:?}", request.assets);
-    
-    // Note: This is blocking, can't call async update_onchain_cache here
-    // We'll need to handle this differently - skip on-chain update for now
-    // or make it async differently
     
     tracing::warn!("Skipping on-chain cache update in sync context");
     
