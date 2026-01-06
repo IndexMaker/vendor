@@ -26,6 +26,7 @@ mod order_sender;
 mod margin;
 mod supply;
 mod rebalance;
+mod order_book;
 
 
 #[derive(Parser, Debug)]
@@ -156,6 +157,27 @@ async fn main() -> Result<()> {
 
     // Create price tracker
     let price_tracker = Arc::new(PriceTracker::new());
+
+    // Create OrderBookProcessor
+    let order_book_config = order_book::OrderBookConfig {
+        depth_levels: 5,  // K = 5 levels
+    };
+
+    let order_book_processor = if let Some(ref asset_mapper_arc) = asset_mapper_locked {
+        let processor = order_book::OrderBookProcessor::new(
+            price_tracker.clone(),
+            asset_mapper_arc.clone(),
+            order_book_config,
+        );
+
+        Some(Arc::new(processor))
+    } else {
+        None
+    };
+
+    if order_book_processor.is_some() {
+        tracing::info!("✓ OrderBookProcessor initialized (K=5 levels)");
+    }
 
     // Initialize StalenessManager (only if asset_mapper exists and onchain enabled)
     let staleness_manager = if let Some(ref asset_mapper_arc) = asset_mapper_locked {

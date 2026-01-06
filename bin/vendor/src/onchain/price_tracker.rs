@@ -1,94 +1,107 @@
-use crate::market_data::types::MarketDataEvent;
-use chrono::{DateTime, Utc};
-use common::amount::Amount;
-use parking_lot::RwLock;
 use std::collections::HashMap;
+use parking_lot::RwLock;
 use std::sync::Arc;
-
-#[derive(Debug, Clone)]
-pub struct PriceInfo {
-    pub price: Amount,
-    pub last_update: DateTime<Utc>,
-}
+use crate::market_data::MarketDataEvent;
+use crate::order_book::types::{OrderBook, Level};
+use common::amount::Amount;
 
 pub struct PriceTracker {
-    prices: Arc<RwLock<HashMap<String, PriceInfo>>>,
+    /// Current prices (best mid)
+    prices: Arc<RwLock<HashMap<String, f64>>>,
+    
+    /// Full order book snapshots (NEW)
+    order_books: Arc<RwLock<HashMap<String, OrderBook>>>,
 }
 
 impl PriceTracker {
     pub fn new() -> Self {
         Self {
             prices: Arc::new(RwLock::new(HashMap::new())),
+            order_books: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     pub fn handle_event(&self, event: Arc<MarketDataEvent>) {
         match event.as_ref() {
+            MarketDataEvent::OrderBookSnapshot {
+                symbol,
+                bid_updates,
+                ask_updates,
+                ..
+            } => {
+                // Update order book - convert Amount to f64
+                let mut books = self.order_books.write();
+                
+                let bids: Vec<Level> = bid_updates
+                    .iter()
+                    .map(|u| Level {
+                        price: u.price.to_u128_raw() as f64 / 1e18,
+                        quantity: u.quantity.to_u128_raw() as f64 / 1e18,
+                    })
+                    .collect();
+                
+                let asks: Vec<Level> = ask_updates
+                    .iter()
+                    .map(|u| Level {
+                        price: u.price.to_u128_raw() as f64 / 1e18,
+                        quantity: u.quantity.to_u128_raw() as f64 / 1e18,
+                    })
+                    .collect();
+                
+                let mut book = OrderBook::new(symbol.clone());
+                book.bids = bids;
+                book.asks = asks;
+                book.timestamp = chrono::Utc::now();
+                
+                books.insert(symbol.clone(), book);
+                
+                // Also update price
+                if !bid_updates.is_empty() && !ask_updates.is_empty() {
+                    let best_bid = bid_updates[0].price.to_u128_raw() as f64 / 1e18;
+                    let best_ask = ask_updates[0].price.to_u128_raw() as f64 / 1e18;
+                    let mid = (best_bid + best_ask) / 2.0;
+                    self.prices.write().insert(symbol.clone(), mid);
+                }
+            }
+            
             MarketDataEvent::TopOfBook {
                 symbol,
                 best_bid_price,
                 best_ask_price,
-                timestamp,
                 ..
             } => {
-                // Use mid price: (bid + ask) / 2
-                let mid_price = if let (Some(bid), Some(ask)) = (
-                    best_bid_price.checked_add(*best_ask_price),
-                    Amount::TWO.checked_div(Amount::ONE),
-                ) {
-                    bid.checked_div(Amount::TWO).unwrap_or(*best_bid_price)
-                } else {
-                    *best_bid_price
-                };
-
-                let price_info = PriceInfo {
-                    price: mid_price,
-                    last_update: *timestamp,
-                };
-
-                self.prices.write().insert(symbol.clone(), price_info);
-
-                tracing::trace!("Updated price for {}: {}", symbol, mid_price);
+                let bid = best_bid_price.to_u128_raw() as f64 / 1e18;
+                let ask = best_ask_price.to_u128_raw() as f64 / 1e18;
+                let mid = (bid + ask) / 2.0;
+                self.prices.write().insert(symbol.clone(), mid);
             }
-            _ => {
-                // Ignore snapshot and delta events
-            }
+            
+            _ => {}
         }
     }
 
     pub fn get_price(&self, symbol: &str) -> Option<Amount> {
-        self.prices
-            .read()
-            .get(symbol)
-            .map(|info| info.price)
-    }
-
-    pub fn get_prices(&self, symbols: &[String]) -> HashMap<String, Amount> {
-        let prices = self.prices.read();
-        symbols
-            .iter()
-            .filter_map(|symbol| {
-                prices
-                    .get(symbol)
-                    .map(|info| (symbol.clone(), info.price))
-            })
-            .collect()
+        self.prices.read().get(symbol).map(|&price| {
+            Amount::from_u128_raw((price * 1e18) as u128)
+        })
     }
 
     pub fn all_prices_available(&self, symbols: &[String]) -> bool {
         let prices = self.prices.read();
-        symbols.iter().all(|symbol| prices.contains_key(symbol))
+        symbols.iter().all(|s| prices.contains_key(s))
     }
-
-    pub fn get_price_age(&self, symbol: &str) -> Option<chrono::Duration> {
-        self.prices.read().get(symbol).map(|info| {
-            let now = Utc::now();
-            now - info.last_update
-        })
+    
+    /// Get full order book for a symbol (NEW)
+    pub fn get_order_book(&self, symbol: &str) -> Option<OrderBook> {
+        self.order_books.read().get(symbol).cloned()
     }
-
-    pub fn summary(&self) -> String {
-        let prices = self.prices.read();
-        format!("PriceTracker: {} prices tracked", prices.len())
+    
+    /// Check if order book is available with sufficient depth (NEW)
+    pub fn has_order_book(&self, symbol: &str, min_levels: usize) -> bool {
+        self.order_books
+            .read()
+            .get(symbol)
+            .map(|book| book.has_sufficient_depth(min_levels))
+            .unwrap_or(false)
     }
 }

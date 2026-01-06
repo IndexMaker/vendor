@@ -9,6 +9,15 @@ pub struct AssetMapper {
     id_to_symbol: HashMap<u128, String>,
 }
 
+impl Default for AssetMapper {
+    fn default() -> Self {
+        Self {
+            symbol_to_id: HashMap::new(),
+            id_to_symbol: HashMap::new(),
+        }
+    }
+}
+
 impl AssetMapper {
     pub async fn load_from_file(path: &Path) -> Result<Self> {
         tracing::info!("Loading asset ID mapping from: {:?}", path);
