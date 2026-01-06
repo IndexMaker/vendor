@@ -7,7 +7,8 @@ use eyre::Result;
 use market_data::{BitgetSubscriber, BitgetSubscriberConfig, MarketDataEvent, MarketDataObserver, Subscription};
 use onchain::{AssetMapper, PriceTracker};
 use parking_lot::RwLock as AtomicLock;
-use parking_lot::lock_api::RwLock;
+use crate::api::{ApiServer, AppState};
+use std::net::SocketAddr;
 use std::{path::PathBuf, sync::Arc};
 use std::time::Duration;
 use tokio::sync::mpsc::unbounded_channel;
@@ -18,7 +19,7 @@ use alloy::{
     providers::ProviderBuilder,
     signers::local::PrivateKeySigner,
 };
-
+mod api;
 mod config;
 mod market_data;
 mod onchain;
@@ -328,6 +329,36 @@ async fn main() -> Result<()> {
     // Keeper will handle on-chain submissions
     tracing::info!("On-chain submissions disabled (Keeper's responsibility)");
 
+   // Start API server
+    let api_server = if let (Some(asset_mapper_arc), Some(staleness_mgr), Some(ob_processor)) = 
+        (&asset_mapper_locked, &staleness_manager, &order_book_processor) 
+    {
+        let api_addr: SocketAddr = format!("0.0.0.0:{}", cli.api_port).parse()?;
+
+        let app_state = AppState {
+            vendor_id: config.blockchain.vendor_id,
+            asset_mapper: asset_mapper_arc.clone(),  // parking_lot::RwLock - matches now!
+            staleness_manager: staleness_mgr.clone(),  // parking_lot::RwLock - matches now!
+            order_book_processor: ob_processor.clone(),
+        };
+
+        let server = ApiServer::new(app_state, api_addr);
+        let cancel_token = server.cancel_token();
+
+        tokio::spawn(async move {
+            if let Err(e) = server.start().await {
+                tracing::error!("API server failed: {:?}", e);
+            }
+        });
+
+        tracing::info!("✓ API server started on http://0.0.0.0:{}", cli.api_port);
+
+        Some(cancel_token)
+    } else {
+        tracing::warn!("API server disabled (missing dependencies)");
+        None
+    };
+
     // Keep running
     tracing::info!("Vendor running. Press Ctrl+C to stop.");
     tokio::signal::ctrl_c().await?;
@@ -339,6 +370,10 @@ async fn main() -> Result<()> {
 
     order_sender_config.stop().await?;
     tracing::info!("✓ OrderSender stopped");
+
+    if let Some(api_cancel) = api_server {
+        api_cancel.cancel();
+    }
 
     tracing::info!("Vendor stopped");
     Ok(())

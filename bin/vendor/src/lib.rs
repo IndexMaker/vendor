@@ -1,5 +1,6 @@
 // bin/vendor/src/lib.rs
 
+pub mod api;
 pub mod config;
 pub mod market_data;
 pub mod onchain;

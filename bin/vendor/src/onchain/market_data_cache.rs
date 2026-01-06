@@ -223,4 +223,9 @@ impl MarketDataCache {
     pub fn get_all_symbols(&self) -> Vec<String> {
         self.cache.keys().cloned().collect()
     }
+    
+    /// Get config reference
+    pub fn config(&self) -> &StalenessConfig {
+        &self.config
+    }
 }

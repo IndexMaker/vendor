@@ -1,4 +1,5 @@
 use crate::onchain::OnchainReader;
+use crate::onchain::market_data_cache::CachedMarketData;
 
 use super::market_data_cache::{MarketDataCache, StalenessConfig};
 use super::price_tracker::PriceTracker;
@@ -174,6 +175,11 @@ where
         tracing::debug!("Marked {} assets as submitted", symbols.len());
     }
     
+    /// Get cached data for a symbol
+    pub fn get_cached_data(&self, symbol: &str) -> Option<&CachedMarketData> {
+        self.cache.get(symbol)
+    }
+
     /// Get staleness config
     pub fn config(&self) -> &StalenessConfig {
         &self.cache.config
