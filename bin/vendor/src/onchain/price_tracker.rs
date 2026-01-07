@@ -86,22 +86,22 @@ impl PriceTracker {
         })
     }
 
-    pub fn all_prices_available(&self, symbols: &[String]) -> bool {
-        let prices = self.prices.read();
-        symbols.iter().all(|s| prices.contains_key(s))
-    }
+    // pub fn all_prices_available(&self, symbols: &[String]) -> bool {
+    //     let prices = self.prices.read();
+    //     symbols.iter().all(|s| prices.contains_key(s))
+    // }
     
     /// Get full order book for a symbol (NEW)
     pub fn get_order_book(&self, symbol: &str) -> Option<OrderBook> {
         self.order_books.read().get(symbol).cloned()
     }
     
-    /// Check if order book is available with sufficient depth (NEW)
-    pub fn has_order_book(&self, symbol: &str, min_levels: usize) -> bool {
-        self.order_books
-            .read()
-            .get(symbol)
-            .map(|book| book.has_sufficient_depth(min_levels))
-            .unwrap_or(false)
-    }
+    // /// Check if order book is available with sufficient depth (NEW)
+    // pub fn has_order_book(&self, symbol: &str, min_levels: usize) -> bool {
+    //     self.order_books
+    //         .read()
+    //         .get(symbol)
+    //         .map(|book| book.has_sufficient_depth(min_levels))
+    //         .unwrap_or(false)
+    // }
 }

@@ -109,7 +109,15 @@ async fn main() -> Result<()> {
     tracing::info!("✓ OrderSender initialized");
 
     // Load configuration
-    let config = VendorConfig::default();
+    tracing::info!("cli args: {:?}", cli);
+    let config = if let Some(config_path) = &cli.config_path {
+        let vendor_config_path = PathBuf::from(config_path).join("vendor_config.json");
+        VendorConfig::from_file(vendor_config_path.to_str().unwrap()).unwrap()
+        // .unwrap_or(VendorConfig::default())
+    } else {
+        VendorConfig::default()
+    };
+        
 
     // Access margin config
     let margin_config = config.margin.clone();
@@ -155,10 +163,12 @@ async fn main() -> Result<()> {
     // Initialize VendorSubmitter (for submitAssets, submitMargin, submitSupply)
     let vendor_submitter = if let Some(ref asset_mapper_arc) = asset_mapper_locked {
         if let Some(castle_address) = &config.blockchain.castle_address {
-            if let Ok(pk) = std::env::var("PRIVATE_KEY") {
+            // Use private key from config instead of environment variable
+            if !config.blockchain.private_key.is_empty() {
                 let castle_addr: Address = castle_address.parse()?;
                 
-                let signer: alloy::signers::local::PrivateKeySigner = pk.parse()?;
+                let signer: alloy::signers::local::PrivateKeySigner = 
+                    config.blockchain.private_key.parse()?;
                 let wallet = alloy::network::EthereumWallet::from(signer);
                 
                 let provider = alloy::providers::ProviderBuilder::new()
@@ -209,8 +219,8 @@ async fn main() -> Result<()> {
                                     rebalance_interval_secs: 60,
                                     enable_onchain_submit: false,
                                 };
-                                
-                                let margin_calc = MarginCalculator::new(
+
+                                let margin_calc = delta_rebalancer::MarginCalculator::new(
                                     price_tracker_clone,
                                     asset_mapper_clone,
                                     margin_config,
@@ -252,7 +262,7 @@ async fn main() -> Result<()> {
 
                 Some(submitter)
             } else {
-                tracing::warn!("VendorSubmitter disabled (no PRIVATE_KEY environment variable)");
+                tracing::warn!("VendorSubmitter disabled (no private_key in vendor_config.json)");
                 None
             }
         } else {
@@ -396,12 +406,12 @@ async fn main() -> Result<()> {
                     best_ask_price,
                     ..
                 } => {
-                    tracing::info!(
-                        "💹 TOB: {} - Bid: {:.8} | Ask: {:.8}",
-                        symbol,
-                        best_bid_price,
-                        best_ask_price
-                    );
+                    // tracing::info!(
+                    //     "💹 TOB: {} - Bid: {:.8} | Ask: {:.8}",
+                    //     symbol,
+                    //     best_bid_price,
+                    //     best_ask_price
+                    // );
                 }
             }
         });
@@ -435,10 +445,6 @@ async fn main() -> Result<()> {
             exchange: "Bitget".to_string(),
         })?;
     }
-
-    // Onchain submitter removed - Vendor only provides quotes
-    // Keeper will handle on-chain submissions
-    tracing::info!("On-chain submissions disabled (Keeper's responsibility)");
 
     // Start API server
     let api_server = if let (Some(asset_mapper_arc), Some(staleness_mgr), Some(ob_processor)) = 

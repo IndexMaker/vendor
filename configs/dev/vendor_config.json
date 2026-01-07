@@ -11,7 +11,8 @@
   "blockchain": {
     "rpc_url": "http://localhost:8547",
     "private_key": "",
-    "castle_address": null
+    "castle_address": "0xab8e440727a38bbb180f7032ca4a8009e7b52b80",
+    "vendor_id": 1
   },
   "margin": {
     "min_order_size_usd": 5.0,
