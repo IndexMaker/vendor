@@ -4,4 +4,5 @@ mod rebalancer;
 mod types;
 
 pub use rebalancer::DeltaRebalancer;
-pub use types::{Delta, RebalanceOrder, RebalancerConfig, VendorDemand};
+pub use types::{Delta, RebalanceOrder, RebalancerConfig};
+pub use margin_calculator::MarginCalculator;

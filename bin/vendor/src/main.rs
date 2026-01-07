@@ -6,6 +6,7 @@ use market_data::{BitgetSubscriber, BitgetSubscriberConfig, MarketDataEvent, Mar
 use onchain::{AssetMapper, PriceTracker};
 use parking_lot::RwLock as AtomicLock;
 use crate::api::{ApiServer, AppState};
+use crate::delta_rebalancer::MarginCalculator;
 use std::net::SocketAddr;
 use std::{path::PathBuf, sync::Arc};
 use std::time::Duration;
@@ -40,9 +41,9 @@ struct Cli {
     #[arg(long)]
     rpc_url: Option<String>,
 
-    // /// Private key for transaction signing
-    // #[arg(long)]
-    // private_key: Option<String>,
+    /// Private key for transaction signing
+    #[arg(long)]
+    private_key: Option<String>,
 
     /// Castle contract address
     #[arg(long)]
@@ -112,10 +113,10 @@ async fn main() -> Result<()> {
 
     // Access margin config
     let margin_config = config.margin.clone();
-    let min_order = margin_config.min_order_size_usd;
-    let total_exp = margin_config.total_exposure_usd;
+    let min_order_size_usd = margin_config.min_order_size_usd;
+    let total_exposure_usd = margin_config.total_exposure_usd;
 
-    tracing::info!("Margin config: min_order=${}, total_exposure=${}", min_order, total_exp);
+    tracing::info!("Margin config: min_order=${}, total_exposure=${}", min_order_size_usd, total_exposure_usd);
 
     // Load asset mapper and symbols
     let (symbols, asset_mapper_locked) = if let Some(config_path) = &cli.config_path {
@@ -148,11 +149,126 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Create market data observer
-    let observer = Arc::new(AtomicLock::new(MarketDataObserver::new()));
-
     // Create price tracker
     let price_tracker = Arc::new(PriceTracker::new());
+
+    // Initialize VendorSubmitter (for submitAssets, submitMargin, submitSupply)
+    let vendor_submitter = if let Some(ref asset_mapper_arc) = asset_mapper_locked {
+        if let Some(castle_address) = &config.blockchain.castle_address {
+            if let Ok(pk) = std::env::var("PRIVATE_KEY") {
+                let castle_addr: Address = castle_address.parse()?;
+                
+                let signer: alloy::signers::local::PrivateKeySigner = pk.parse()?;
+                let wallet = alloy::network::EthereumWallet::from(signer);
+                
+                let provider = alloy::providers::ProviderBuilder::new()
+                    .with_gas_estimation()
+                    .wallet(wallet)
+                    .connect_http(config.blockchain.rpc_url.parse()?);
+
+                let submitter = Arc::new(onchain::VendorSubmitter::new(
+                    provider,
+                    castle_addr,
+                    config.blockchain.vendor_id,
+                ));
+
+                // Submit assets on startup (max 120 as per Sonia's requirement)
+                let asset_mapper_read = asset_mapper_arc.read();
+                let all_symbols = asset_mapper_read.get_all_symbols();
+                let asset_ids: Vec<u128> = all_symbols
+                    .iter()
+                    .filter_map(|symbol| asset_mapper_read.get_id(symbol))
+                    .collect();
+                drop(asset_mapper_read);
+                
+                if !asset_ids.is_empty() && cli.enable_onchain {
+                    tracing::info!("Submitting {} assets to Castle on startup...", asset_ids.len());
+                    match submitter.submit_assets(asset_ids.clone()).await {
+                        Ok(_) => {
+                            tracing::info!("✓ Assets submitted successfully");
+                            
+                            // Spawn task to submit margin after market data is available
+                            let submitter_clone = submitter.clone();
+                            let asset_ids_clone = asset_ids.clone();
+                            let price_tracker_clone = price_tracker.clone();
+                            let asset_mapper_clone = asset_mapper_arc.clone();
+                            let vendor_id = config.blockchain.vendor_id;
+                            let min_order = config.margin.min_order_size_usd;
+                            let total_exp = config.margin.total_exposure_usd;
+                            
+                            tokio::spawn(async move {
+                                // Wait for order book data (WebSocket needs time to connect)
+                                tracing::info!("Waiting 10s for market data before submitting margin...");
+                                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                                
+                                // Calculate margins
+                                let margin_config = delta_rebalancer::RebalancerConfig {
+                                    vendor_id,
+                                    min_order_size_usd: min_order,
+                                    total_exposure_usd: total_exp,
+                                    rebalance_interval_secs: 60,
+                                    enable_onchain_submit: false,
+                                };
+                                
+                                let margin_calc = MarginCalculator::new(
+                                    price_tracker_clone,
+                                    asset_mapper_clone,
+                                    margin_config,
+                                );
+                                
+                                let margins_map = margin_calc.calculate_margins(&asset_ids_clone);
+                                
+                                let margins: Vec<common::amount::Amount> = asset_ids_clone.iter()
+                                    .filter_map(|id| margins_map.get(id).map(|m| m.max_quantity))
+                                    .collect();
+                                
+                                if margins.len() == asset_ids_clone.len() {
+                                    tracing::info!("Submitting margin for {} assets...", asset_ids_clone.len());
+                                    match submitter_clone.submit_margin(asset_ids_clone, margins).await {
+                                        Ok(_) => {
+                                            tracing::info!("✓ Margin submitted successfully");
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("✗ Failed to submit margin: {:?}", e);
+                                        }
+                                    }
+                                } else {
+                                    tracing::warn!(
+                                        "Cannot submit margin: {} margins for {} assets (prices not ready)",
+                                        margins.len(),
+                                        asset_ids_clone.len()
+                                    );
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            tracing::error!("✗ Failed to submit assets: {:?}", e);
+                            tracing::warn!("Continuing without asset submission...");
+                        }
+                    }
+                } else if !cli.enable_onchain {
+                    tracing::info!("Skipping asset submission (--enable-onchain not set)");
+                }
+
+                Some(submitter)
+            } else {
+                tracing::warn!("VendorSubmitter disabled (no PRIVATE_KEY environment variable)");
+                None
+            }
+        } else {
+            tracing::warn!("VendorSubmitter disabled (no castle_address in config)");
+            None
+        }
+    } else {
+        None
+    };
+
+    if vendor_submitter.is_some() {
+        tracing::info!("✓ VendorSubmitter initialized");
+    }
+
+    // Create market data observer
+    let observer = Arc::new(AtomicLock::new(MarketDataObserver::new()));
 
     // Create OrderBookProcessor
     let order_book_config = order_book::OrderBookConfig {
@@ -354,51 +470,40 @@ async fn main() -> Result<()> {
         None
     };
 
-    let _delta_rebalancer = if let (Some(asset_mapper_arc), Some(supply_mgr)) = 
-        (&asset_mapper_locked, &supply_manager) 
+    // Initialize DeltaRebalancer
+    let _delta_rebalancer = if let (
+        Some(asset_mapper_arc), 
+        Some(supply_mgr), 
+        Some(vendor_sub)) 
+        = 
+        (&asset_mapper_locked, &supply_manager, &vendor_submitter)
     {
-        if let Some(castle_address) = &config.blockchain.castle_address {
-            let castle_addr: Address = castle_address.parse()?;
-            
-            let provider = ProviderBuilder::new()
-                .connect_http(config.blockchain.rpc_url.parse()?);
-            
-            let onchain_reader = Arc::new(onchain::OnchainReader::new(
-                provider,
-                castle_addr,
-                config.blockchain.vendor_id,
-            ));
-            
-            let rebalancer_config = delta_rebalancer::RebalancerConfig {
-                vendor_id: config.blockchain.vendor_id,
-                min_order_size_usd: config.margin.min_order_size_usd,
-                total_exposure_usd: config.margin.total_exposure_usd,
-                rebalance_interval_secs: 60,
-                enable_onchain_submit: false,
-            };
-            
-            let rebalancer = Arc::new(delta_rebalancer::DeltaRebalancer::new(
-                rebalancer_config,
-                onchain_reader,
-                supply_mgr.clone(),
-                price_tracker.clone(),
-                asset_mapper_arc.clone(),
-                order_sender,
-            ));
-            
-            tokio::spawn({
-                let rebalancer = rebalancer.clone();
-                async move {
-                    rebalancer.run().await;
-                }
-            });
-            
-            tracing::info!("✓ DeltaRebalancer started (60s interval)");
-            Some(rebalancer)
-        } else {
-            tracing::warn!("DeltaRebalancer disabled (no castle_address)");
-            None
-        }
+        let rebalancer_config = delta_rebalancer::RebalancerConfig {
+            vendor_id: config.blockchain.vendor_id,
+            min_order_size_usd: config.margin.min_order_size_usd,
+            total_exposure_usd: config.margin.total_exposure_usd,
+            rebalance_interval_secs: 60,
+            enable_onchain_submit: cli.enable_onchain,
+        };
+        
+        let rebalancer = Arc::new(delta_rebalancer::DeltaRebalancer::new(
+            rebalancer_config,
+            Arc::clone(vendor_sub),  // Explicit Arc::clone
+            Arc::clone(supply_mgr),  // Explicit Arc::clone
+            Arc::clone(&price_tracker),
+            Arc::clone(asset_mapper_arc),  // Explicit Arc::clone
+            order_sender,
+        ));
+        
+        tokio::spawn({
+            let rebalancer = Arc::clone(&rebalancer);
+            async move {
+                rebalancer.run().await;
+            }
+        });
+        
+        tracing::info!("✓ DeltaRebalancer started (60s interval)");
+        Some(rebalancer)
     } else {
         tracing::warn!("DeltaRebalancer disabled (missing dependencies)");
         None

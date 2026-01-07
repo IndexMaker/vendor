@@ -1,11 +1,12 @@
 use super::delta_calculator::DeltaCalculator;
 use super::margin_calculator::MarginCalculator;
-use super::types::{Delta, RebalanceOrder, RebalancerConfig, VendorDemand};
-use crate::onchain::{AssetMapper, OnchainReader};
+use super::types::{Delta, RebalanceOrder, RebalancerConfig};
+use crate::onchain::{AssetMapper, VendorSubmitter, VendorDemand};
 use crate::order_sender::{AssetOrder, OrderSender, OrderSide, OrderType};
 use crate::supply::SupplyManager;
-use crate::PriceTracker;
+use crate::onchain::PriceTracker;
 use common::amount::Amount;
+use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock as TokioRwLock;
@@ -15,11 +16,11 @@ where
     P: alloy::providers::Provider + Clone,
 {
     config: RebalancerConfig,
-    onchain_reader: Arc<OnchainReader<P>>,
-    supply_manager: Arc<parking_lot::RwLock<SupplyManager>>,
+    vendor_submitter: Arc<VendorSubmitter<P>>,
+    supply_manager: Arc<RwLock<SupplyManager>>,
     margin_calculator: Arc<MarginCalculator>,
-    order_sender: Option<Arc<TokioRwLock<dyn OrderSender>>>,  // CHANGED TYPE
-    asset_mapper: Arc<parking_lot::RwLock<AssetMapper>>,
+    order_sender: Option<Arc<TokioRwLock<dyn OrderSender>>>,
+    asset_mapper: Arc<RwLock<AssetMapper>>,
     price_tracker: Arc<PriceTracker>,
 }
 
@@ -29,11 +30,11 @@ where
 {
     pub fn new(
         config: RebalancerConfig,
-        onchain_reader: Arc<OnchainReader<P>>,
-        supply_manager: Arc<parking_lot::RwLock<SupplyManager>>,
+        vendor_submitter: Arc<VendorSubmitter<P>>,
+        supply_manager: Arc<RwLock<SupplyManager>>,
         price_tracker: Arc<PriceTracker>,
-        asset_mapper: Arc<parking_lot::RwLock<AssetMapper>>,
-        order_sender: Option<Arc<TokioRwLock<dyn OrderSender>>>,  // CHANGED TYPE
+        asset_mapper: Arc<RwLock<AssetMapper>>,
+        order_sender: Option<Arc<TokioRwLock<dyn OrderSender>>>,
     ) -> Self {
         let margin_calculator = Arc::new(MarginCalculator::new(
             price_tracker.clone(),
@@ -43,7 +44,7 @@ where
 
         Self {
             config,
-            onchain_reader,
+            vendor_submitter,
             supply_manager,
             margin_calculator,
             order_sender,
@@ -52,16 +53,23 @@ where
         }
     }
 
+    /// Fetch vendor demand from on-chain
+    async fn fetch_vendor_demand(&self) -> eyre::Result<VendorDemand> {
+        // CHANGED: Now uses real implementation via VendorSubmitter
+        self.vendor_submitter.get_vendor_demand().await
+    }
+
     /// Start the rebalance loop
     pub async fn run(self: Arc<Self>) {
         let mut interval = tokio::time::interval(Duration::from_secs(
             self.config.rebalance_interval_secs,
         ));
 
-        tracing::info!(
-            "🔄 DeltaRebalancer started (interval: {}s)",
-            self.config.rebalance_interval_secs
-        );
+        tracing::info!("🔄 DeltaRebalancer started");
+        tracing::info!("  Interval: {}s", self.config.rebalance_interval_secs);
+        tracing::info!("  Min order size: ${}", self.config.min_order_size_usd);
+        tracing::info!("  Total exposure: ${}", self.config.total_exposure_usd);
+        tracing::info!("  On-chain submit: {}", self.config.enable_onchain_submit);
 
         loop {
             interval.tick().await;
@@ -130,28 +138,55 @@ where
 
         tracing::info!("  ✓ Executed {} orders", executed);
 
-        // Step 7: Check if supply needs on-chain submission
+        // Step 7: Submit updated supply to on-chain (if enabled and dirty)
         if self.config.enable_onchain_submit {
             let supply_state = self.supply_manager.read().get_state();
             
             if supply_state.needs_submission() {
-                tracing::info!("  Supply changed - needs on-chain submission");
-                // TODO: Implement submitSupply call
-                tracing::debug!("  Skipping on-chain supply submission (not implemented yet)");
+                tracing::info!("  📤 Supply changed - submitting to Castle");
+                
+                // Collect changed assets with their supply data
+                let changed_symbols = supply_state.get_changed_assets();
+                let mut asset_ids = Vec::new();
+                let mut supply_long = Vec::new();
+                let mut supply_short = Vec::new();
+                
+                for symbol in &changed_symbols {
+                    if let Some(supply) = supply_state.get_supply(symbol) {
+                        asset_ids.push(supply.asset_id);
+                        supply_long.push(supply.supply_long);
+                        supply_short.push(supply.supply_short);
+                    }
+                }
+                
+                if !asset_ids.is_empty() {
+                    tracing::info!(
+                        "  Submitting supply for {} changed assets",
+                        asset_ids.len()
+                    );
+                    
+                    match self.vendor_submitter
+                        .submit_supply(asset_ids, supply_long, supply_short)
+                        .await
+                    {
+                        Ok(_) => {
+                            // Mark as submitted
+                            self.supply_manager.write().state.mark_submitted();
+                            tracing::info!("  ✓ Supply submitted to Castle successfully");
+                        }
+                        Err(e) => {
+                            tracing::error!("  ✗ Failed to submit supply: {:?}", e);
+                        }
+                    }
+                } else {
+                    tracing::debug!("  No changed assets to submit");
+                }
+            } else {
+                tracing::trace!("  Supply unchanged - no submission needed");
             }
         }
 
         Ok(())
-    }
-
-    /// Fetch vendor demand from on-chain
-    async fn fetch_vendor_demand(&self) -> eyre::Result<VendorDemand> {
-        // TODO: Implement IFactor::getVendorDemand() call
-        // For now, return empty demand
-        tracing::warn!("getVendorDemand() not implemented yet - returning empty");
-        Ok(VendorDemand {
-            assets: std::collections::HashMap::new(),
-        })
     }
 
     /// Generate rebalance orders from delta and margins

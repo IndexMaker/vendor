@@ -8,7 +8,7 @@ use std::{collections::HashMap, sync::Arc};
 /// Manages vendor's supply state (long/short positions per asset)
 /// Supply is tracked off-chain and submitted to on-chain when needed
 pub struct SupplyManager {
-    state: SupplyState,
+    pub(crate) state: SupplyState,
     asset_mapper: Arc<RwLock<AssetMapper>>,
 }
 

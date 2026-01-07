@@ -36,12 +36,6 @@ impl Delta {
     }
 }
 
-/// On-chain demand data from IFactor::getVendorDemand()
-#[derive(Debug, Clone)]
-pub struct VendorDemand {
-    pub assets: HashMap<u128, Amount>,  // asset_id → demand_quantity
-}
-
 /// Margin calculation result per asset
 #[derive(Debug, Clone)]
 pub struct AssetMargin {

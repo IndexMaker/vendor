@@ -1,5 +1,5 @@
-use super::types::{Delta, VendorDemand};
-use crate::supply::SupplyState;
+use super::types::{Delta};
+use crate::{onchain::VendorDemand, supply::SupplyState};
 use common::amount::Amount;
 
 pub struct DeltaCalculator;
