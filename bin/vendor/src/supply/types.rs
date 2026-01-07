@@ -175,6 +175,62 @@ impl SupplyState {
     pub fn get_supply(&self, symbol: &str) -> Option<&AssetSupply> {
         self.supplies.get(symbol)
     }
+
+    /// Get long quantity for a specific asset by asset_id
+    pub fn get_long_quantity(&self, asset_id: u128) -> Amount {
+        self.supplies
+            .values()
+            .find(|s| s.asset_id == asset_id)
+            .map(|s| s.supply_long)
+            .unwrap_or(Amount::ZERO)
+    }
+
+    /// Get short quantity for a specific asset by asset_id
+    pub fn get_short_quantity(&self, asset_id: u128) -> Amount {
+        self.supplies
+            .values()
+            .find(|s| s.asset_id == asset_id)
+            .map(|s| s.supply_short)
+            .unwrap_or(Amount::ZERO)
+    }
+
+    /// Get supply for a specific asset by asset_id
+    pub fn get_supply_by_id(&self, asset_id: u128) -> Option<&AssetSupply> {
+        self.supplies.values().find(|s| s.asset_id == asset_id)
+    }
+
+    /// Add long position by asset_id
+    pub fn add_long_by_id(&mut self, asset_id: u128, amount: Amount) -> Result<(), String> {
+        // Find the symbol for this asset_id
+        let symbol = self
+            .supplies
+            .values()
+            .find(|s| s.asset_id == asset_id)
+            .map(|s| s.symbol.clone())
+            .ok_or_else(|| format!("Asset {} not found in supply state", asset_id))?;
+
+        // Use existing record_buy method
+        self.record_buy(&symbol, amount)
+    }
+
+    /// Add short position by asset_id
+    pub fn add_short_by_id(&mut self, asset_id: u128, amount: Amount) -> Result<(), String> {
+        // Find the symbol for this asset_id
+        let symbol = self
+            .supplies
+            .values()
+            .find(|s| s.asset_id == asset_id)
+            .map(|s| s.symbol.clone())
+            .ok_or_else(|| format!("Asset {} not found in supply state", asset_id))?;
+
+        // Use existing record_sell method
+        self.record_sell(&symbol, amount)
+    }
+
+    /// Get a clone of the entire state (for rebalancer)
+    pub fn clone_state(&self) -> Self {
+        self.clone()
+    }
 }
 
 impl Default for SupplyState {

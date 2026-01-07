@@ -221,4 +221,28 @@ impl SupplyManager {
 
         deltas
     }
+
+    /// Get the current supply state (read-only access)
+    pub fn get_state(&self) -> SupplyState {
+        self.state.clone_state()
+    }
+
+    /// Add long position by asset_id (wrapper for rebalancer)
+    pub fn add_long(&mut self, asset_id: u128, qty: Amount) -> eyre::Result<()> {
+        self.state
+            .add_long_by_id(asset_id, qty)
+            .map_err(|e| eyre::eyre!("Failed to add long position: {}", e))
+    }
+
+    /// Add short position by asset_id (wrapper for rebalancer)
+    pub fn add_short(&mut self, asset_id: u128, qty: Amount) -> eyre::Result<()> {
+        self.state
+            .add_short_by_id(asset_id, qty)
+            .map_err(|e| eyre::eyre!("Failed to add short position: {}", e))
+    }
+
+    /// Initialize asset by asset_id (if symbol known)
+    pub fn init_asset_by_id(&mut self, asset_id: u128, symbol: String) {
+        self.state.init_asset(symbol, asset_id);
+    }
 }

@@ -1,7 +1,5 @@
 use alloy_primitives::Address;
-use chrono::Utc;
 use clap::Parser;
-use common::amount::Amount;
 use config::VendorConfig;
 use eyre::Result;
 use market_data::{BitgetSubscriber, BitgetSubscriberConfig, MarketDataEvent, MarketDataObserver, Subscription};
@@ -13,12 +11,8 @@ use std::{path::PathBuf, sync::Arc};
 use std::time::Duration;
 use tokio::sync::mpsc::unbounded_channel;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use alloy::providers::ProviderBuilder;
 
-use alloy::{
-    network::EthereumWallet,
-    providers::ProviderBuilder,
-    signers::local::PrivateKeySigner,
-};
 mod api;
 mod config;
 mod market_data;
@@ -28,6 +22,7 @@ mod margin;
 mod supply;
 mod rebalance;
 mod order_book;
+mod delta_rebalancer;
 
 
 #[derive(Parser, Debug)]
@@ -45,9 +40,9 @@ struct Cli {
     #[arg(long)]
     rpc_url: Option<String>,
 
-    /// Private key for transaction signing
-    #[arg(long)]
-    private_key: Option<String>,
+    // /// Private key for transaction signing
+    // #[arg(long)]
+    // private_key: Option<String>,
 
     /// Castle contract address
     #[arg(long)]
@@ -329,7 +324,7 @@ async fn main() -> Result<()> {
     // Keeper will handle on-chain submissions
     tracing::info!("On-chain submissions disabled (Keeper's responsibility)");
 
-   // Start API server
+    // Start API server
     let api_server = if let (Some(asset_mapper_arc), Some(staleness_mgr), Some(ob_processor)) = 
         (&asset_mapper_locked, &staleness_manager, &order_book_processor) 
     {
@@ -356,6 +351,56 @@ async fn main() -> Result<()> {
         Some(cancel_token)
     } else {
         tracing::warn!("API server disabled (missing dependencies)");
+        None
+    };
+
+    let _delta_rebalancer = if let (Some(asset_mapper_arc), Some(supply_mgr)) = 
+        (&asset_mapper_locked, &supply_manager) 
+    {
+        if let Some(castle_address) = &config.blockchain.castle_address {
+            let castle_addr: Address = castle_address.parse()?;
+            
+            let provider = ProviderBuilder::new()
+                .connect_http(config.blockchain.rpc_url.parse()?);
+            
+            let onchain_reader = Arc::new(onchain::OnchainReader::new(
+                provider,
+                castle_addr,
+                config.blockchain.vendor_id,
+            ));
+            
+            let rebalancer_config = delta_rebalancer::RebalancerConfig {
+                vendor_id: config.blockchain.vendor_id,
+                min_order_size_usd: config.margin.min_order_size_usd,
+                total_exposure_usd: config.margin.total_exposure_usd,
+                rebalance_interval_secs: 60,
+                enable_onchain_submit: false,
+            };
+            
+            let rebalancer = Arc::new(delta_rebalancer::DeltaRebalancer::new(
+                rebalancer_config,
+                onchain_reader,
+                supply_mgr.clone(),
+                price_tracker.clone(),
+                asset_mapper_arc.clone(),
+                order_sender,
+            ));
+            
+            tokio::spawn({
+                let rebalancer = rebalancer.clone();
+                async move {
+                    rebalancer.run().await;
+                }
+            });
+            
+            tracing::info!("✓ DeltaRebalancer started (60s interval)");
+            Some(rebalancer)
+        } else {
+            tracing::warn!("DeltaRebalancer disabled (no castle_address)");
+            None
+        }
+    } else {
+        tracing::warn!("DeltaRebalancer disabled (missing dependencies)");
         None
     };
 
