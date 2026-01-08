@@ -15,7 +15,7 @@ members = [
     # "bin/scenarios",
 
     "bin/vendor",
-    # "bin/keeper",
+    "bin/keeper",
 
     "proc-macros/abacus-macros",
     "proc-macros/amount-macros",

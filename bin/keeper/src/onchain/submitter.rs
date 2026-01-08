@@ -143,10 +143,10 @@ where
         // Build contract call
         let call = IFactor::submitMarketDataCall {
             vendor_id: self.config.vendor_id,
-            asset_names: asset_names.to_vec(),
-            asset_liquidity: asset_liquidity.to_vec(),
-            asset_prices: asset_prices.to_vec(),
-            asset_slopes: asset_slopes.to_vec(),
+            asset_names: asset_names.to_vec().into(),
+            asset_liquidity: asset_liquidity.to_vec().into(),
+            asset_prices: asset_prices.to_vec().into(),
+            asset_slopes: asset_slopes.to_vec().into(),
         };
 
         // Build transaction
@@ -184,13 +184,15 @@ where
         let asset_contribution_fractions = Vector::from_vec_u128(acf_values);
 
         // Build contract call
+        // TODO see scenario5 in valutWorks and fill trader_address correctly
         let call = IFactor::submitBuyOrderCall {
             vendor_id: self.config.vendor_id,
             index_id,
             collateral_added: buy_order.collateral_added.to_u128_raw(),
             collateral_removed: buy_order.collateral_removed.to_u128_raw(),
             max_order_size: buy_order.max_order_size.to_u128_raw(),
-            asset_contribution_fractions: asset_contribution_fractions.to_vec(),
+            asset_contribution_fractions: asset_contribution_fractions.to_vec().into(),
+            trader_address: Address::ZERO,
         };
 
         // Build transaction

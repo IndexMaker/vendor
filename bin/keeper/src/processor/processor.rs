@@ -167,7 +167,7 @@ impl QuoteProcessor {
         let net_collateral = index_state.net_collateral_change;
 
         // Skip if net collateral change is zero or negative
-        if net_collateral.is_not() || net_collateral < Amount::ZERO {
+        if net_collateral.is_zero() || net_collateral < Amount::ZERO {
             tracing::debug!(
                 "Skipping index {} - no positive collateral change",
                 index_id
