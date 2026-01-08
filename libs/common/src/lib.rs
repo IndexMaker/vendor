@@ -9,7 +9,6 @@ pub mod amount;
 pub mod interfaces {
     pub mod banker;
     pub mod castle;
-    pub mod abacus;
     pub mod constable;
     pub mod factor;
     pub mod clerk;
@@ -17,6 +16,9 @@ pub mod interfaces {
     pub mod scribe;
     pub mod treasury;
     pub mod worksman;
+    pub mod vault;
+    pub mod vault_native;
+    pub mod vault_requests;
 }
 
 pub mod labels;

@@ -52,7 +52,7 @@ where
 
         let call = IBanker::submitAssetsCall {
             vendor_id: self.vendor_id,
-            market_asset_names: asset_names.to_vec(),
+            market_asset_names: asset_names.to_vec().into(),
         };
 
         let tx = TransactionRequest::default()
@@ -98,8 +98,8 @@ where
 
         let call = IBanker::submitMarginCall {
             vendor_id: self.vendor_id,
-            asset_names: asset_names.to_vec(),
-            asset_margin: asset_margin.to_vec(),
+            asset_names: asset_names.to_vec().into(),
+            asset_margin: asset_margin.to_vec().into(),
         };
 
         let tx = TransactionRequest::default()
@@ -150,9 +150,9 @@ where
 
         let call = IBanker::submitSupplyCall {
             vendor_id: self.vendor_id,
-            asset_names: asset_names.to_vec(),
-            asset_quantities_short: supply_short_vec.to_vec(),
-            asset_quantities_long: supply_long_vec.to_vec(),
+            asset_names: asset_names.to_vec().into(),
+            asset_quantities_short: supply_short_vec.to_vec().into(),
+            asset_quantities_long: supply_long_vec.to_vec().into(),
         };
 
         let tx = TransactionRequest::default()
@@ -171,39 +171,79 @@ where
     }
 
     /// Get vendor demand from Castle (IBanker::getVendorDemand)
+    /// Returns net demand per asset (demand_long - demand_short)
     pub async fn get_vendor_demand(&self) -> eyre::Result<VendorDemand> {
-        tracing::debug!("📥 Reading vendor demand from Castle...");
+        tracing::info!("📥 Reading vendor demand from Castle...");
 
-        let call = IBanker::getVendorDemandCall {
+        // Step 1: Get vendor assets (asset IDs list)
+        let assets_call = IBanker::getVendorAssetsCall {
             vendor_id: self.vendor_id,
         };
 
-        // FIXED: Remove & and pass TransactionRequest by value
-        let result = self
+        let assets_result = self
             .provider
-            .call(TransactionRequest::default()  // REMOVED &
+            .call(TransactionRequest::default()
                 .to(self.castle_address)
-                .input(call.abi_encode().into()))
+                .input(assets_call.abi_encode().into()))
             .await?;
 
-        // FIXED: Remove second argument (false)
-        let decoded = IBanker::getVendorDemandCall::abi_decode_returns(&result)?;
+        let assets_decoded = IBanker::getVendorAssetsCall::abi_decode_returns(&assets_result)?;
+        
+        // Parse asset IDs
+        let asset_ids = Labels::from_vec(assets_decoded.0);
 
-        // Parse response (returns tuple of two arrays)
-        let asset_names = Labels::from_vec(decoded._0);
-        let demand_quantities = Vector::from_vec(decoded._1);
+        tracing::info!("  Found {} assets for vendor", asset_ids.data.len());
 
+        // Step 2: Get vendor demand (demand_long, demand_short)
+        let demand_call = IBanker::getVendorDemandCall {
+            vendor_id: self.vendor_id,
+        };
+
+        let demand_result = self
+            .provider
+            .call(TransactionRequest::default()
+                .to(self.castle_address)
+                .input(demand_call.abi_encode().into()))
+            .await?;
+
+        let demand_decoded = IBanker::getVendorDemandCall::abi_decode_returns(&demand_result)?;
+
+        // Parse demand_long and demand_short vectors
+        let demand_long = Vector::from_vec(demand_decoded._0);
+        let demand_short = Vector::from_vec(demand_decoded._1);
+
+        tracing::info!(
+            "  Demand vectors: {} long, {} short",
+            demand_long.data.len(),
+            demand_short.data.len()
+        );
+
+        // Step 3: Calculate net demand per asset (demand_long - demand_short)
         let mut demand = VendorDemand {
             assets: HashMap::new(),
         };
 
-        for (i, asset_id) in asset_names.data.iter().enumerate() {
-            if let Some(qty) = demand_quantities.data.get(i) {
-                demand.assets.insert(*asset_id, *qty);
-            }
+        for (i, asset_id) in asset_ids.data.iter().enumerate() {
+            let long_qty = demand_long.data.get(i).copied().unwrap_or(Amount::ZERO);
+            let short_qty = demand_short.data.get(i).copied().unwrap_or(Amount::ZERO);
+
+            // Net demand = long - short
+            let net_demand = long_qty
+                .checked_sub(short_qty)
+                .unwrap_or(Amount::ZERO);
+
+            demand.assets.insert(*asset_id, net_demand);
+
+            tracing::info!(
+                "    Asset {}: long={:.4}, short={:.4}, net={:.4}",
+                asset_id,
+                long_qty.to_u128_raw() as f64 / 1e18,
+                short_qty.to_u128_raw() as f64 / 1e18,
+                net_demand.to_u128_raw() as f64 / 1e18
+            );
         }
 
-        tracing::debug!("  Read demand for {} assets", demand.assets.len());
+        tracing::info!("  Calculated net demand for {} assets", demand.assets.len());
 
         Ok(demand)
     }

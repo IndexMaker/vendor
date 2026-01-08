@@ -99,6 +99,11 @@ impl Amount {
         Some(Self(try_convert_to_u128(result)?))
     }
 
+    pub fn checked_idiv(self, rhs: Self) -> Option<Self> {
+        let result = (self.to_u256() / rhs.to_u256()) * Self::u256_scale();
+        Some(Self(try_convert_to_u128(result)?))
+    }
+
     pub fn checked_sq(self) -> Option<Self> {
         let this = self.to_u256();
         let result = (this * this) / Self::u256_scale();
@@ -126,11 +131,7 @@ impl Amount {
     }
 
     #[inline]
-    pub fn is_not(&self) -> bool {
-        // Note: we don't want to call this function is_zero(), because we're
-        // representing decimal numbers, and we should compare against some
-        // threshold and not against absolute 0. The function of is_not() is to
-        // tell that amount is not set rather than having zero value.
+    pub fn is_zero(&self) -> bool {
         self.0 == 0
     }
 
@@ -185,6 +186,17 @@ impl Amount {
         convert_from_u128(Self::SCALE)
     }
 
+    #[cfg(feature = "with-ethers")]
+    #[inline]
+    pub fn try_from_u256_ethers(value: EthersU256) -> Option<Self> {
+        Some(Self(value.try_into().ok()?))
+    }
+
+    #[cfg(feature = "with-ethers")]
+    #[inline]
+    pub fn to_u256_ethers(&self) -> EthersU256 {
+        EthersU256::from(self.0)
+    }
 }
 
 #[cfg(any(not(feature = "stylus"), feature = "debug"))]

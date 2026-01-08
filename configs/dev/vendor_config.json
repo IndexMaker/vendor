@@ -11,7 +11,7 @@
   "blockchain": {
     "rpc_url": "http://localhost:8547",
     "private_key": "",
-    "castle_address": "0xab8e440727a38bbb180f7032ca4a8009e7b52b80",
+    "castle_address": "0x3e8fde46e0d00b3c6a0efb07244cae8e9526a395",
     "vendor_id": 1
   },
   "margin": {

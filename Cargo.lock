@@ -3330,48 +3330,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "keeper"
-version = "0.1.0"
-dependencies = [
- "abacus-macros",
- "alloy",
- "alloy-primitives",
- "alloy-sol-types",
- "amount-macros",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "chrono",
- "clap",
- "common",
- "crc32fast",
- "derive_builder",
- "dotenv",
- "ethers",
- "eyre",
- "futures",
- "futures-util",
- "hmac",
- "itertools 0.14.0",
- "labels-macros",
- "parking_lot",
- "rand 0.9.2",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2",
- "sha256",
- "tokio",
- "tokio-tungstenite 0.28.0",
- "tokio-util",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "vector-macros",
-]
-
-[[package]]
 name = "labels-macros"
 version = "0.1.0"
 dependencies = [
@@ -4700,29 +4658,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.111",
-]
-
-[[package]]
-name = "scenarios"
-version = "0.1.0"
-dependencies = [
- "abacus-macros",
- "alloy",
- "alloy-primitives",
- "alloy-sol-types",
- "amount-macros",
- "chrono",
- "clap",
- "common",
- "ethers",
- "eyre",
- "futures",
- "itertools 0.14.0",
- "labels-macros",
- "reqwest 0.12.28",
- "serde",
- "tokio",
- "vector-macros",
 ]
 
 [[package]]

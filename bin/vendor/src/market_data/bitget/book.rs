@@ -121,7 +121,7 @@ impl Book {
             
             let price_level = PriceLevel::from_strings(price_str, qty_str)?;
             
-            if price_level.quantity.is_not() {
+            if price_level.quantity.is_zero() {
                 self.bids.remove(&price_level.price);
             } else {
                 let book_level = BookLevel {
@@ -144,7 +144,7 @@ impl Book {
             
             let price_level = PriceLevel::from_strings(price_str, qty_str)?;
             
-            if price_level.quantity.is_not() {
+            if price_level.quantity.is_zero() {
                 self.asks.remove(&price_level.price);
             } else {
                 let book_level = BookLevel {
