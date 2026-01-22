@@ -1,3 +1,3 @@
 mod mapper;
 
-pub use mapper::{AssetWeight, IndexConfig, IndexMapper};
+pub use mapper::IndexMapper;

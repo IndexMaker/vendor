@@ -9,9 +9,9 @@
     }
   },
   "blockchain": {
-    "rpc_url": "http://localhost:8547",
-    "private_key": "",
-    "castle_address": "0x3e8fde46e0d00b3c6a0efb07244cae8e9526a395",
+    "rpc_url": "https://index.rpc.zeeve.net/",
+    "private_key": "0x355faf10c89b4aa1c96964b4d7b38ed5844eea436bd1ae8029cb073d3d3355ff",
+    "castle_address": "0x1409a0ce0770e6e428add1ef73c6d872319557d8",
     "vendor_id": 1
   },
   "margin": {

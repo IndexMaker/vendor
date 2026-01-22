@@ -1,6 +1,9 @@
 use super::delta_calculator::DeltaCalculator;
 use super::margin_calculator::MarginCalculator;
-use super::types::{Delta, RebalanceOrder, RebalancerConfig};
+use super::types::{Delta, RebalanceOrder, RebalancerConfig, RebalanceDecision, ExecutionMode};
+use crate::buffer::{
+    OrderBuffer, BufferedOrder, BufferOrderSide, InventorySimulator, SimulationReason,
+};
 use crate::onchain::{AssetMapper, VendorSubmitter, VendorDemand};
 use crate::order_sender::{AssetOrder, OrderSender, OrderSide, OrderType};
 use crate::supply::SupplyManager;
@@ -22,6 +25,12 @@ where
     order_sender: Option<Arc<TokioRwLock<dyn OrderSender>>>,
     asset_mapper: Arc<RwLock<AssetMapper>>,
     price_tracker: Arc<PriceTracker>,
+    /// Async buffer for deferred exchange orders (on-chain first strategy)
+    order_buffer: Option<Arc<OrderBuffer>>,
+    /// Inventory simulator for simulation mode
+    inventory_simulator: Option<Arc<InventorySimulator>>,
+    /// Current USDC balance (updated externally)
+    usdc_balance: Arc<RwLock<Amount>>,
 }
 
 impl<P> DeltaRebalancer<P>
@@ -50,7 +59,95 @@ where
             order_sender,
             asset_mapper,
             price_tracker,
+            order_buffer: None,
+            inventory_simulator: None,
+            usdc_balance: Arc::new(RwLock::new(Amount::ZERO)),
         }
+    }
+
+    /// Configure the order buffer for deferred exchange execution
+    pub fn with_order_buffer(mut self, buffer: Arc<OrderBuffer>) -> Self {
+        self.order_buffer = Some(buffer);
+        self
+    }
+
+    /// Configure the inventory simulator for simulation mode
+    pub fn with_inventory_simulator(mut self, simulator: Arc<InventorySimulator>) -> Self {
+        self.inventory_simulator = Some(simulator);
+        self
+    }
+
+    /// Update the USDC balance (call this periodically from balance monitoring)
+    pub fn update_usdc_balance(&self, balance: Amount) {
+        *self.usdc_balance.write() = balance;
+    }
+
+    /// Get current USDC balance
+    pub fn get_usdc_balance(&self) -> Amount {
+        *self.usdc_balance.read()
+    }
+
+    /// Determine execution mode for an order
+    fn determine_execution_mode(
+        &self,
+        order: &RebalanceOrder,
+        exchange_min_order_size: Amount,
+    ) -> (ExecutionMode, String) {
+        let usdc_balance = self.get_usdc_balance();
+        let usdc_balance_f64 = usdc_balance.to_u128_raw() as f64 / 1e18;
+        let order_usd_f64 = order.quantity_usd.to_u128_raw() as f64 / 1e18;
+
+        // Check conditions for simulation mode
+        let below_min_size = order.quantity < exchange_min_order_size;
+        let insufficient_balance = usdc_balance_f64 < self.config.usdc_balance_threshold
+            || usdc_balance_f64 < order_usd_f64;
+
+        // Inventory simulation mode takes precedence
+        if self.config.inventory_simulation_enabled {
+            if below_min_size && insufficient_balance {
+                return (
+                    ExecutionMode::Simulated,
+                    format!(
+                        "Simulation: below min size ({:.6} < {:.6}) AND insufficient USDC (${:.2} < ${:.2})",
+                        order.quantity.to_u128_raw() as f64 / 1e18,
+                        exchange_min_order_size.to_u128_raw() as f64 / 1e18,
+                        usdc_balance_f64,
+                        order_usd_f64
+                    ),
+                );
+            }
+            if below_min_size {
+                return (
+                    ExecutionMode::Simulated,
+                    format!(
+                        "Simulation: below min order size ({:.6} < {:.6})",
+                        order.quantity.to_u128_raw() as f64 / 1e18,
+                        exchange_min_order_size.to_u128_raw() as f64 / 1e18,
+                    ),
+                );
+            }
+            if insufficient_balance {
+                return (
+                    ExecutionMode::Simulated,
+                    format!(
+                        "Simulation: insufficient USDC (${:.2} < ${:.2})",
+                        usdc_balance_f64,
+                        order_usd_f64.max(self.config.usdc_balance_threshold)
+                    ),
+                );
+            }
+        }
+
+        // On-chain first mode (normal path with sufficient resources)
+        if self.config.onchain_first_enabled {
+            return (
+                ExecutionMode::OnchainFirst,
+                "On-chain first: submit to blockchain immediately, defer exchange".to_string(),
+            );
+        }
+
+        // Normal mode (legacy behavior)
+        (ExecutionMode::Normal, "Normal: execute on exchange first".to_string())
     }
 
     /// Fetch vendor demand from on-chain
@@ -80,9 +177,18 @@ where
         }
     }
 
-    /// Execute one rebalance cycle
+    /// Execute one rebalance cycle with "on-chain first" strategy
+    ///
+    /// Flow:
+    /// 1. Fetch on-chain demand
+    /// 2. Calculate delta
+    /// 3. Generate orders with execution mode decisions
+    /// 4. **ON-CHAIN FIRST**: Submit supply to blockchain IMMEDIATELY
+    /// 5. **DEFERRED**: Queue exchange orders for later execution
+    /// 6. **SIMULATION**: Track simulated positions when can't execute
     async fn rebalance_once(&self) -> eyre::Result<()> {
-        tracing::info!("🔄 Rebalance cycle starting");
+        tracing::info!("🔄 Rebalance cycle starting (on-chain first mode: {})",
+            self.config.onchain_first_enabled);
 
         // Step 1: Fetch on-chain Demand
         tracing::debug!("  Fetching on-chain demand...");
@@ -95,8 +201,16 @@ where
 
         tracing::info!("  On-chain demand: {} assets", demand.assets.len());
 
-        // Step 2: Get internal Supply state (using your SupplyState)
-        let supply = self.supply_manager.read().get_state();
+        // Step 2: Get internal Supply state (including simulated positions)
+        let mut supply = self.supply_manager.read().get_state();
+
+        // Add simulated positions to supply calculation
+        if let Some(ref sim) = self.inventory_simulator {
+            for pos in sim.get_pending_simulations() {
+                // Add simulated quantity to supply (we're pretending we have it)
+                let _ = supply.add_long_by_id(pos.asset_id, pos.quantity);
+            }
+        }
 
         tracing::debug!(
             "  Current supply tracking: {} assets, dirty={}",
@@ -123,34 +237,44 @@ where
         tracing::debug!("  Calculating margins...");
         let margins = self.margin_calculator.calculate_margins(&delta.all_assets());
 
-        // Step 5: Generate orders
-        let orders = self.generate_orders(&delta, &margins)?;
+        // Step 5: Generate orders with execution mode decisions
+        let decisions = self.generate_orders_with_decisions(&delta, &margins)?;
 
-        if orders.is_empty() {
+        if decisions.is_empty() {
             tracing::info!("  No orders generated (all below min_order_size)");
             return Ok(());
         }
 
-        tracing::info!("  Generated {} rebalance orders", orders.len());
+        tracing::info!("  Generated {} rebalance decisions", decisions.len());
 
-        // Step 6: Execute orders
-        let executed = self.execute_orders(orders).await?;
+        // =========================================================================
+        // ON-CHAIN FIRST STRATEGY: Submit to blockchain IMMEDIATELY
+        // =========================================================================
+        if self.config.onchain_first_enabled || self.config.enable_onchain_submit {
+            // Update supply state with ALL orders (including simulated)
+            for decision in &decisions {
+                match decision.execution_mode {
+                    ExecutionMode::OnchainFirst | ExecutionMode::Simulated => {
+                        // Update supply state AS IF we executed
+                        self.update_supply_from_decision(decision)?;
+                    }
+                    ExecutionMode::Normal => {
+                        // Normal mode: will update after actual execution
+                    }
+                }
+            }
 
-        tracing::info!("  ✓ Executed {} orders", executed);
-
-        // Step 7: Submit updated supply to on-chain (if enabled and dirty)
-        if self.config.enable_onchain_submit {
+            // SUPER FAST: Submit to blockchain NOW
             let supply_state = self.supply_manager.read().get_state();
-            
+
             if supply_state.needs_submission() {
-                tracing::info!("  📤 Supply changed - submitting to Castle");
-                
-                // Collect changed assets with their supply data
+                tracing::info!("  🚀 ON-CHAIN FIRST: Submitting supply to Castle IMMEDIATELY");
+
                 let changed_symbols = supply_state.get_changed_assets();
                 let mut asset_ids = Vec::new();
                 let mut supply_long = Vec::new();
                 let mut supply_short = Vec::new();
-                
+
                 for symbol in &changed_symbols {
                     if let Some(supply) = supply_state.get_supply(symbol) {
                         asset_ids.push(supply.asset_id);
@@ -158,31 +282,247 @@ where
                         supply_short.push(supply.supply_short);
                     }
                 }
-                
+
                 if !asset_ids.is_empty() {
                     tracing::info!(
                         "  Submitting supply for {} changed assets",
                         asset_ids.len()
                     );
-                    
+
                     match self.vendor_submitter
                         .submit_supply(asset_ids, supply_long, supply_short)
                         .await
                     {
                         Ok(_) => {
-                            // Mark as submitted
                             self.supply_manager.write().state.mark_submitted();
                             tracing::info!("  ✓ Supply submitted to Castle successfully");
+
+                            // Mark simulated positions as on-chain submitted
+                            if let Some(ref sim) = self.inventory_simulator {
+                                for decision in &decisions {
+                                    if decision.execution_mode == ExecutionMode::Simulated {
+                                        sim.mark_onchain_submitted(
+                                            &decision.order.symbol,
+                                            &format!("rebalance-{}", decision.order.asset_id),
+                                        );
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             tracing::error!("  ✗ Failed to submit supply: {:?}", e);
+                            // Continue anyway - we'll retry next cycle
                         }
                     }
-                } else {
-                    tracing::debug!("  No changed assets to submit");
                 }
-            } else {
-                tracing::trace!("  Supply unchanged - no submission needed");
+            }
+        }
+
+        // =========================================================================
+        // DEFERRED EXECUTION: Queue exchange orders for later
+        // =========================================================================
+        let mut normal_orders = Vec::new();
+        let mut deferred_count = 0;
+        let mut simulated_count = 0;
+
+        for decision in decisions {
+            match decision.execution_mode {
+                ExecutionMode::Normal => {
+                    // Execute immediately (legacy flow)
+                    normal_orders.push(decision.order);
+                }
+                ExecutionMode::OnchainFirst => {
+                    // Queue for deferred exchange execution
+                    if let Some(ref buffer) = self.order_buffer {
+                        let buffered_order = BufferedOrder::new(
+                            decision.order.asset_id,
+                            decision.order.symbol.clone(),
+                            match decision.order.side {
+                                OrderSide::Buy => BufferOrderSide::Buy,
+                                OrderSide::Sell => BufferOrderSide::Sell,
+                            },
+                            decision.order.quantity,
+                            format!("rebalance-{}", decision.order.asset_id),
+                        );
+
+                        match buffer.push(buffered_order) {
+                            Ok(()) => {
+                                tracing::info!(
+                                    "  📦 Deferred: {} {} {} ({})",
+                                    decision.order.side,
+                                    decision.order.quantity.to_u128_raw() as f64 / 1e18,
+                                    decision.order.symbol,
+                                    decision.mode_reason
+                                );
+                                deferred_count += 1;
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "  ✗ Failed to buffer order for {}: {:?}",
+                                    decision.order.symbol,
+                                    e
+                                );
+                            }
+                        }
+                    } else {
+                        // No buffer configured - fall back to immediate execution
+                        normal_orders.push(decision.order);
+                    }
+                }
+                ExecutionMode::Simulated => {
+                    // Track simulated position (no exchange execution)
+                    if let Some(ref sim) = self.inventory_simulator {
+                        let price = self.price_tracker
+                            .get_price(&decision.order.symbol)
+                            .unwrap_or(Amount::ZERO);
+
+                        let reason = if decision.mode_reason.contains("insufficient") {
+                            SimulationReason::InsufficientBalance
+                        } else if decision.mode_reason.contains("min") {
+                            SimulationReason::BelowMinOrderSize
+                        } else {
+                            SimulationReason::BelowMinAndInsufficientBalance
+                        };
+
+                        match sim.add_simulation(
+                            decision.order.asset_id,
+                            decision.order.symbol.clone(),
+                            decision.order.quantity,
+                            price,
+                            reason,
+                            format!("rebalance-{}", decision.order.asset_id),
+                        ) {
+                            Ok(_) => {
+                                tracing::info!(
+                                    "  🎭 Simulated: {} {} {} ({})",
+                                    decision.order.side,
+                                    decision.order.quantity.to_u128_raw() as f64 / 1e18,
+                                    decision.order.symbol,
+                                    decision.mode_reason
+                                );
+                                simulated_count += 1;
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "  ✗ Failed to simulate order for {}: {}",
+                                    decision.order.symbol,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Execute any normal orders immediately
+        if !normal_orders.is_empty() {
+            let executed = self.execute_orders(normal_orders).await?;
+            tracing::info!("  ✓ Executed {} orders immediately", executed);
+        }
+
+        tracing::info!(
+            "  📊 Summary: {} deferred, {} simulated",
+            deferred_count,
+            simulated_count
+        );
+
+        Ok(())
+    }
+
+    /// Generate orders with execution mode decisions
+    fn generate_orders_with_decisions(
+        &self,
+        delta: &Delta,
+        margins: &std::collections::HashMap<u128, super::types::AssetMargin>,
+    ) -> eyre::Result<Vec<RebalanceDecision>> {
+        let mut decisions = Vec::new();
+
+        // For simulation mode, we accept orders even below min_order_size
+        let min_order_usd = if self.config.inventory_simulation_enabled {
+            Amount::ZERO // Accept all orders in simulation mode
+        } else {
+            Amount::from_u128_with_scale(
+                (self.config.min_order_size_usd * 1e18) as u128,
+                18,
+            )
+        };
+
+        // Exchange min order size (for mode decision)
+        let exchange_min_order_size = Amount::from_u128_with_scale(
+            (self.config.min_order_size_usd * 1e18) as u128,
+            18,
+        );
+
+        // Process LONG positions (BUY orders)
+        for (asset_id, delta_qty) in &delta.long_positions {
+            let order = self.create_order(
+                *asset_id,
+                *delta_qty,
+                OrderSide::Buy,
+                margins,
+                min_order_usd,
+            )?;
+
+            if let Some(order) = order {
+                let (execution_mode, mode_reason) =
+                    self.determine_execution_mode(&order, exchange_min_order_size);
+
+                decisions.push(RebalanceDecision {
+                    order,
+                    execution_mode,
+                    mode_reason,
+                });
+            }
+        }
+
+        // Process SHORT positions (SELL orders)
+        for (asset_id, delta_qty) in &delta.short_positions {
+            let order = self.create_order(
+                *asset_id,
+                *delta_qty,
+                OrderSide::Sell,
+                margins,
+                min_order_usd,
+            )?;
+
+            if let Some(order) = order {
+                let (execution_mode, mode_reason) =
+                    self.determine_execution_mode(&order, exchange_min_order_size);
+
+                decisions.push(RebalanceDecision {
+                    order,
+                    execution_mode,
+                    mode_reason,
+                });
+            }
+        }
+
+        Ok(decisions)
+    }
+
+    /// Update supply state from a rebalance decision (before exchange execution)
+    fn update_supply_from_decision(&self, decision: &RebalanceDecision) -> eyre::Result<()> {
+        let mut supply_mgr = self.supply_manager.write();
+
+        match decision.order.side {
+            OrderSide::Buy => {
+                supply_mgr.add_long(decision.order.asset_id, decision.order.quantity)?;
+                tracing::debug!(
+                    "      Pre-updated supply: +{:.8} long for {} (mode: {:?})",
+                    decision.order.quantity.to_u128_raw() as f64 / 1e18,
+                    decision.order.symbol,
+                    decision.execution_mode
+                );
+            }
+            OrderSide::Sell => {
+                supply_mgr.add_short(decision.order.asset_id, decision.order.quantity)?;
+                tracing::debug!(
+                    "      Pre-updated supply: +{:.8} short for {} (mode: {:?})",
+                    decision.order.quantity.to_u128_raw() as f64 / 1e18,
+                    decision.order.symbol,
+                    decision.execution_mode
+                );
             }
         }
 

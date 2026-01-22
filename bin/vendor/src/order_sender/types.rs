@@ -192,3 +192,48 @@ impl FeeDetail {
         }
     }
 }
+
+/// Execution mode for order sending.
+///
+/// Controls how orders are priced and whether refill logic is applied.
+/// Story 3-8: Adaptive Pricing with Orderbook Depth Analysis
+///
+/// NOTE: BitgetOrderSender defaults to StaticPricing for backward compatibility.
+/// Use `with_adaptive_pricing()` and `with_refill_manager()` to enable adaptive modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    /// Use adaptive pricing based on orderbook depth with automatic refill for partials.
+    /// This is the recommended mode for index trading with 100+ assets.
+    /// Enable via: `sender.with_adaptive_pricing(...).with_refill_manager(...)`
+    AdaptiveWithRefill,
+
+    /// Use adaptive pricing based on orderbook depth without refill logic.
+    /// Use when partial fills are acceptable and speed is priority.
+    AdaptiveNoRefill,
+
+    /// Use static spread-based pricing (original behavior).
+    /// Useful for testing or when orderbook data is unavailable.
+    StaticPricing,
+}
+
+impl ExecutionMode {
+    /// Check if this mode uses adaptive pricing
+    pub fn is_adaptive(&self) -> bool {
+        matches!(self, Self::AdaptiveWithRefill | Self::AdaptiveNoRefill)
+    }
+
+    /// Check if this mode enables refill logic
+    pub fn has_refill(&self) -> bool {
+        matches!(self, Self::AdaptiveWithRefill)
+    }
+}
+
+impl std::fmt::Display for ExecutionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExecutionMode::AdaptiveWithRefill => write!(f, "Adaptive+Refill"),
+            ExecutionMode::AdaptiveNoRefill => write!(f, "Adaptive"),
+            ExecutionMode::StaticPricing => write!(f, "Static"),
+        }
+    }
+}

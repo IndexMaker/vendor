@@ -1,0 +1,19 @@
+[package]
+name = "scripts"
+version = "0.1.0"
+edition = "2021"
+description = "Utility scripts for vendor operations"
+
+[[bin]]
+name = "list-bitget-pairs"
+path = "src/bin/list_bitget_pairs.rs"
+
+[dependencies]
+clap = { workspace = true, features = ["derive"] }
+eyre = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+serde = { workspace = true }
+serde_json = "1.0"
+tokio = { workspace = true, features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

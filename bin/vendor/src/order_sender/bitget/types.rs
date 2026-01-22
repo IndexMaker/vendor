@@ -84,9 +84,21 @@ pub struct OrderDetail {
     pub base_volume: String, // filled quantity
     #[serde(rename = "quoteVolume")]
     pub quote_volume: String, // filled notional
+    /// Fee amount - may be in feeDetail field for some order types
+    #[serde(default)]
     pub fee: String,
-    #[serde(rename = "feeCcy")]
+    /// Fee detail string (Bitget returns this for some order types instead of fee)
+    #[serde(rename = "feeDetail", default)]
+    pub fee_detail: String,
+    /// Fee currency - optional, may not be present for cancelled orders
+    #[serde(rename = "feeCcy", default)]
     pub fee_currency: String,
+    /// Quote coin (e.g., USDC)
+    #[serde(rename = "quoteCoin", default)]
+    pub quote_coin: String,
+    /// Base coin (e.g., BTC)
+    #[serde(rename = "baseCoin", default)]
+    pub base_coin: String,
     #[serde(rename = "priceAvg")]
     pub avg_price: String,
     pub status: String, // "new", "partial_fill", "full_fill", "cancelled"
@@ -98,7 +110,7 @@ pub struct OrderDetail {
 
 impl OrderDetail {
     pub fn is_filled(&self) -> bool {
-        self.status == "full_fill"
+        self.status == "full_fill" || self.status == "filled"
     }
 
     pub fn is_partially_filled(&self) -> bool {

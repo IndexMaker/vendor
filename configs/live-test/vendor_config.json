@@ -1,0 +1,28 @@
+{
+    "blockchain": {
+        "rpc_url": "https://index.rpc.zeeve.net",
+        "castle_address": "0x1409a0ce0770e6e428add1ef73c6d872319557d8",
+        "vendor_id": 1,
+        "private_key": "0x355faf10c89b4aa1c96964b4d7b38ed5844eea436bd1ae8029cb073d3d3355ff"
+    },
+    "market_data": {
+        "bitget": {
+            "websocket_url": "wss://ws.bitget.com/v2/ws/public",
+            "subscription_limit_rate": 10,
+            "stale_check_period_secs": 30,
+            "stale_timeout_secs": 60,
+            "heartbeat_interval_secs": 25
+        }
+    },
+    "margin": {
+        "min_order_size_usd": 5.0,
+        "total_exposure_usd": 1000.0,
+        "price_change_threshold": 0.05,
+        "margin_update_timeout_secs": 3600
+    },
+    "staleness": {
+        "price_threshold": 0.01,
+        "liquidity_threshold": 0.05,
+        "time_threshold_secs": 60
+    }
+}

@@ -6,13 +6,20 @@
     "retry_attempts": 3
   },
   "blockchain": {
-    "rpc_url": "http://localhost:8545",
-    "castle_address": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
-    "vendor_id": 1,
-    "dry_run": true
+    "rpc_url": "https://index.rpc.zeeve.net/",
+    "castle_address": "0x1409a0ce0770e6e428add1ef73c6d872319557d8",
+    "vendor_id": 2,
+    "dry_run": false
   },
   "polling": {
     "interval_secs": 5,
-    "batch_window_ms": 500
+    "batch_window_ms": 100
+  },
+  "event_listener": {
+    "mode": "polling",
+    "polling_interval_ms": 2000
+  },
+  "contracts": {
+    "vault_orders": "0x2d424cF86C4927e476762667Af78FFDBdCE3456E"
   }
 }

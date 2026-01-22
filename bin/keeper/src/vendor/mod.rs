@@ -1,7 +1,7 @@
-mod cache;
 mod client;
 mod types;
 
-pub use cache::QuoteCache;
-pub use client::VendorClient;
-pub use types::{AssetsQuote, HealthResponse, QuoteAssetsRequest};
+pub use client::{UpdateMarketDataConfig, VendorClient};
+pub use types::AssetsQuote;
+// Story 2.5: Export update market data types
+pub use types::UpdateMarketDataRequest;

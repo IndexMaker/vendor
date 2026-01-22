@@ -241,6 +241,34 @@ impl BitgetClient {
         price: Amount,
         client_order_id: Option<String>,
     ) -> Result<PlaceOrderResponse> {
+        self.place_limit_order_amount_with_force(symbol, side, quantity, price, client_order_id, "gtc")
+            .await
+    }
+
+    /// Place a limit order with explicit time-in-force (force) parameter.
+    ///
+    /// # Arguments
+    /// * `symbol` - Trading pair (e.g., "BTCUSDT")
+    /// * `side` - Buy or Sell
+    /// * `quantity` - Order quantity as Amount
+    /// * `price` - Limit price as Amount
+    /// * `client_order_id` - Optional client order ID for tracking
+    /// * `force` - Time-in-force: "gtc", "ioc", "fok", "post_only"
+    ///
+    /// # Time-in-Force Options
+    /// - "gtc" - Good Till Cancelled (default for limit orders)
+    /// - "ioc" - Immediate or Cancel (fills immediately, cancels remainder)
+    /// - "fok" - Fill or Kill (must fill entirely or cancel)
+    /// - "post_only" - Only adds liquidity, rejects if would take
+    pub async fn place_limit_order_amount_with_force(
+        &self,
+        symbol: &str,
+        side: super::super::types::OrderSide,
+        quantity: Amount,
+        price: Amount,
+        client_order_id: Option<String>,
+        force: &str,
+    ) -> Result<PlaceOrderResponse> {
         let side_str = match side {
             super::super::types::OrderSide::Buy => "buy",
             super::super::types::OrderSide::Sell => "sell",
@@ -250,14 +278,47 @@ impl BitgetClient {
         let price_str = Self::amount_to_price_string(price);
 
         tracing::debug!(
-            "Placing limit order: {} {} {} @ {}",
+            "Placing limit order: {} {} {} @ {} (force: {})",
             side_str,
             quantity_str,
             symbol,
-            price_str
+            price_str,
+            force
         );
 
-        self.place_limit_order(symbol, side_str, &quantity_str, &price_str, client_order_id)
+        let request = PlaceOrderRequest {
+            symbol: symbol.to_string(),
+            side: side_str.to_string(),
+            order_type: "limit".to_string(),
+            force: force.to_string(),
+            price: price_str,
+            size: quantity_str,
+            client_order_id,
+        };
+
+        self.post("/api/v2/spot/trade/place-order", &request)
+            .await
+    }
+
+    /// Place an IOC (Immediate or Cancel) limit order.
+    ///
+    /// IOC orders execute immediately at the specified price or better.
+    /// Any unfilled portion is immediately cancelled (not added to orderbook).
+    ///
+    /// # Behavior
+    /// - Fills immediately or cancels
+    /// - May result in partial fill + cancelled remainder
+    /// - No waiting for fills (unlike GTC orders)
+    /// - Response time should be fast (~500ms)
+    pub async fn place_ioc_order(
+        &self,
+        symbol: &str,
+        side: super::super::types::OrderSide,
+        quantity: Amount,
+        price: Amount,
+        client_order_id: Option<String>,
+    ) -> Result<PlaceOrderResponse> {
+        self.place_limit_order_amount_with_force(symbol, side, quantity, price, client_order_id, "ioc")
             .await
     }
 

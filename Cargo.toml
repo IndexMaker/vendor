@@ -16,6 +16,7 @@ members = [
 
     "bin/vendor",
     "bin/keeper",
+    "bin/scripts",
 
     "proc-macros/abacus-macros",
     "proc-macros/amount-macros",
@@ -42,6 +43,7 @@ alloy-sol-macro = { version = "1.2", default-features = false }
 alloy-sol-macro-expander = { version = "1.2", default-features = false }
 alloy-sol-macro-input = { version = "1.2", default-features = false }
 alloy-sol-types = "1.2"
+alloy-contract = "1.2"
 amount-macros = { path = "./proc-macros/amount-macros" }
 chrono = { version = "0.4.42", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }

@@ -53,6 +53,30 @@ impl BitgetWebSocket {
         Ok(())
     }
 
+    /// Subscribe to multiple symbols in a single message (batch subscription)
+    /// Bitget supports up to 1000 channels per connection, but recommends < 50 symbols
+    /// for stability. Each symbol uses 2 channels (books + ticker).
+    pub async fn subscribe_batch(&mut self, symbols: &[String]) -> Result<()> {
+        if symbols.is_empty() {
+            return Ok(());
+        }
+
+        let subscribe_msg = SubscribeMessage::new_batch(symbols);
+        let json = serde_json::to_string(&subscribe_msg)?;
+
+        tracing::info!(
+            "Batch subscribing to {} symbols ({} channels): first={}, last={}",
+            symbols.len(),
+            symbols.len() * 2,
+            symbols.first().map(|s| s.as_str()).unwrap_or(""),
+            symbols.last().map(|s| s.as_str()).unwrap_or("")
+        );
+        tracing::trace!("Batch subscribe message: {}", json);
+
+        self.send_text(&json).await?;
+        Ok(())
+    }
+
     pub async fn send_ping(&mut self) -> Result<()> {
         // Bitget uses string "ping", not JSON
         self.send_text("ping").await?;

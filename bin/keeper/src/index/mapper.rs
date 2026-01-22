@@ -1,4 +1,4 @@
-use common::amount::Amount;
+use common::event_cache::{CachedIndex, EventCacheReader, SharedEventCache};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -20,12 +20,21 @@ pub struct AssetWeight {
 /// Maps index IDs to their configurations
 pub struct IndexMapper {
     indices: HashMap<u128, IndexConfig>,
+    /// Optional event cache reader for discovering indices from chain events
+    event_cache: Option<SharedEventCache>,
+}
+
+impl Default for IndexMapper {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl IndexMapper {
     pub fn new() -> Self {
         Self {
             indices: HashMap::new(),
+            event_cache: None,
         }
     }
 
@@ -33,13 +42,26 @@ impl IndexMapper {
     pub async fn load_from_file(path: &Path) -> eyre::Result<Self> {
         let contents = tokio::fs::read_to_string(path).await?;
         let configs: Vec<IndexConfig> = serde_json::from_str(&contents)?;
-        
+
         let mut mapper = Self::new();
         for config in configs {
             mapper.add_index(config);
         }
-        
+
         Ok(mapper)
+    }
+
+    /// Check if an index exists in the event cache
+    pub fn has_cached_index(&self, index_id: u128) -> bool {
+        self.event_cache
+            .as_ref()
+            .and_then(|c| c.get_index(index_id))
+            .is_some()
+    }
+
+    /// Get a cached index by ID
+    pub fn get_cached_index(&self, index_id: u128) -> Option<CachedIndex> {
+        self.event_cache.as_ref()?.get_index(index_id)
     }
 
     /// Add an index configuration
@@ -59,7 +81,7 @@ impl IndexMapper {
             .values()
             .flat_map(|idx| idx.assets.iter().map(|a| a.asset_id))
             .collect();
-        
+
         asset_ids.sort_unstable();
         asset_ids.dedup();
         asset_ids
@@ -79,10 +101,6 @@ impl IndexMapper {
 
     pub fn len(&self) -> usize {
         self.indices.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.indices.is_empty()
     }
 }
 

@@ -8,14 +8,12 @@ sol! {
 
         function submitSupply(uint128 vendor_id, bytes calldata asset_names, bytes calldata asset_quantities_short, bytes calldata asset_quantities_long) external;
 
-        function getVendorAssets(uint128 vendor_id) external returns (bytes memory);
+        function submitMarketData(uint128 vendor_id, bytes calldata asset_names, bytes calldata asset_liquidity, bytes calldata asset_prices, bytes calldata asset_slopes) external;
+        
+        function updateIndexQuote(uint128 vendor_id, uint128 index_id) external;
 
-        function getVendorMargin(uint128 vendor_id) external returns (bytes memory);
+        function updateMultipleIndexQuotes(uint128 vendor_id, uint128[] memory index_ids) external;
 
-        function getVendorSupply(uint128 vendor_id) external returns (bytes memory, bytes memory);
-
-        function getVendorDemand(uint128 vendor_id) external returns (bytes memory, bytes memory);
-
-        function getVendorDelta(uint128 vendor_id) external returns (bytes memory, bytes memory);
+        event IndexQuoteUpdated(uint128 index_id, address sender);
     }
 }

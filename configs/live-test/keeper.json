@@ -1,0 +1,30 @@
+{
+    "keeper_id": 1,
+    "vendor": {
+        "url": "http://localhost:8080",
+        "timeout_secs": 10,
+        "retry_attempts": 3,
+        "update_market_data_endpoint": "/update-market-data",
+        "update_market_data_timeout_secs": 30,
+        "update_market_data_retry_attempts": 2
+    },
+    "blockchain": {
+        "rpc_url": "https://index.rpc.zeeve.net",
+        "castle_address": "0x1409a0ce0770e6e428add1ef73c6d872319557d8",
+        "vendor_id": 2,
+        "dry_run": false
+    },
+    "contracts": {
+        "vault_orders": "0xC71b518779176868F47E52a8c6ae4Ac4D7bAC934"
+    },
+    "polling": {
+        "interval_secs": 2,
+        "batch_window_ms": 500
+    },
+    "event_listener": {
+        "mode": "polling",
+        "ws_url": "",
+        "polling_interval_ms": 1000,
+        "reconnect_max_delay_ms": 5000
+    }
+}

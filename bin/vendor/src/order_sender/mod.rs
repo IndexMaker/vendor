@@ -1,16 +1,24 @@
+pub mod adaptive_pricing;
 pub mod bitget;
 pub mod config;
 pub mod fees;
+pub mod index_orderbook_fetcher;
+pub mod rate_limiter;
+pub mod refill_manager;
 pub mod simulated;
 pub mod traits;
 pub mod types;
 
-pub use bitget::BitgetClient;
+pub use adaptive_pricing::AdaptivePricingStrategy;
+pub use bitget::{BatchExecutionSummary, BitgetClient};
 pub use config::{BitgetCredentials, OrderSenderConfig, OrderSenderMode};
 pub use fees::FeeTracker;
+pub use index_orderbook_fetcher::{IndexOrderbookFetcher, IndexOrderbookFetcherConfig, FetchStats};
+pub use rate_limiter::RateLimiter;
+pub use refill_manager::RefillManager;
 pub use simulated::SimulatedOrderSender;
 pub use traits::OrderSender;
-pub use types::{AssetOrder, ExecutionResult, OrderSide, OrderStatus, OrderType};
+pub use types::{AssetOrder, ExecutionResult, ExecutionMode, OrderSide, OrderStatus, OrderType};
 
 
 

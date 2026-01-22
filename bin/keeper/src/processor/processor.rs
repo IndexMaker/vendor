@@ -262,6 +262,7 @@ impl QuoteProcessor {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields used for tracing/logging via Debug output
 pub struct PayloadSummary {
     pub index_count: usize,
     pub unique_assets: usize,

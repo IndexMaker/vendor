@@ -12,6 +12,7 @@ pub struct AssetMarketData {
 
 /// Complete market data from vendor
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // timestamp field used for tracing/debugging
 pub struct MarketDataSnapshot {
     pub assets: HashMap<u128, AssetMarketData>,
     pub timestamp: chrono::DateTime<chrono::Utc>,
@@ -40,6 +41,7 @@ impl MarketDataSnapshot {
 
 /// Asset quantity needed for an index
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields used for tracing/debugging via Debug output
 pub struct AssetAllocation {
     pub asset_id: u128,
     pub quantity: Amount,
@@ -48,6 +50,7 @@ pub struct AssetAllocation {
 
 /// Buy order for a single index
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // max_order_size field used for tracing/debugging
 pub struct IndexBuyOrder {
     pub index_id: u128,
     pub collateral_added: Amount,
@@ -66,6 +69,7 @@ impl IndexBuyOrder {
 
 /// Complete submission payload for on-chain
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // vendor_id field used for tracing/debugging
 pub struct SubmissionPayload {
     pub market_data: MarketDataSnapshot,
     pub buy_orders: Vec<IndexBuyOrder>,
@@ -83,9 +87,5 @@ impl SubmissionPayload {
 
     pub fn add_buy_order(&mut self, order: IndexBuyOrder) {
         self.buy_orders.push(order);
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.buy_orders.is_empty()
     }
 }

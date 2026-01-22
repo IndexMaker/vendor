@@ -8,5 +8,5 @@ pub mod types;
 pub use client::BitgetClient;
 pub use errors::BitgetErrorType;
 pub use pricing::PricingStrategy;
-pub use sender::BitgetOrderSender;
+pub use sender::{BatchExecutionSummary, BitgetOrderSender};
 pub use types::*;

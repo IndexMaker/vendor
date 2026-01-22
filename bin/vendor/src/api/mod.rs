@@ -4,4 +4,7 @@ pub mod types;
 
 pub use routes::AppState;
 pub use server::ApiServer;
-pub use types::{AssetsQuote, QuoteAssetsRequest};
+pub use types::{
+    AssetsQuote, QuoteAssetsRequest, ProcessAssetsRequest, ProcessAssetsResponse, ProcessMetrics,
+    UpdateMarketDataRequest, UpdateMarketDataResponse,
+};

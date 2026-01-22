@@ -62,6 +62,14 @@ pub struct RebalancerConfig {
     pub total_exposure_usd: f64,    // e.g., 1000.0 USD
     pub rebalance_interval_secs: u64,  // e.g., 60 seconds
     pub enable_onchain_submit: bool,  // Submit updated supply to Castle
+
+    // On-chain first strategy configuration
+    /// Enable "on-chain first" mode: submit to blockchain immediately, exchange later
+    pub onchain_first_enabled: bool,
+    /// Enable inventory simulation: accept orders even when can't cover exchange min_order_size
+    pub inventory_simulation_enabled: bool,
+    /// USDC balance threshold below which we switch to simulation mode
+    pub usdc_balance_threshold: f64,
 }
 
 impl Default for RebalancerConfig {
@@ -72,6 +80,31 @@ impl Default for RebalancerConfig {
             total_exposure_usd: 1000.0,
             rebalance_interval_secs: 60,
             enable_onchain_submit: false,
+            onchain_first_enabled: true,       // NEW: On-chain first is default
+            inventory_simulation_enabled: true, // NEW: Simulation mode enabled by default
+            usdc_balance_threshold: 10.0,      // NEW: Minimum USDC to require
         }
     }
+}
+
+/// Result of a rebalance decision with execution mode
+#[derive(Debug, Clone)]
+pub struct RebalanceDecision {
+    /// The order to execute
+    pub order: RebalanceOrder,
+    /// How to execute this order
+    pub execution_mode: ExecutionMode,
+    /// Reason for the execution mode choice
+    pub mode_reason: String,
+}
+
+/// How an order should be executed
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    /// Normal flow: execute on exchange, then submit supply to on-chain
+    Normal,
+    /// On-chain first: submit supply immediately, defer exchange execution
+    OnchainFirst,
+    /// Simulation: accept without exchange execution, track simulated position
+    Simulated,
 }

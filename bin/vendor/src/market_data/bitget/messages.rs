@@ -149,4 +149,26 @@ impl SubscribeMessage {
             ],
         }
     }
+
+    /// Create a batch subscribe message for multiple symbols
+    /// Each symbol gets both "books" and "ticker" channels
+    pub fn new_batch(symbols: &[String]) -> Self {
+        let mut args = Vec::with_capacity(symbols.len() * 2);
+        for symbol in symbols {
+            args.push(SubscribeArg {
+                inst_type: "SPOT".to_string(),
+                channel: "books".to_string(),
+                inst_id: symbol.to_uppercase(),
+            });
+            args.push(SubscribeArg {
+                inst_type: "SPOT".to_string(),
+                channel: "ticker".to_string(),
+                inst_id: symbol.to_uppercase(),
+            });
+        }
+        Self {
+            op: "subscribe".to_string(),
+            args,
+        }
+    }
 }

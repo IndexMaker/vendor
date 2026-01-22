@@ -25,6 +25,10 @@ pub struct BitgetConfig {
     pub stale_check_period_secs: u64,
     pub stale_timeout_secs: i64,
     pub heartbeat_interval_secs: u64,
+    /// Symbols per WebSocket connection (default: 50, recommended by Bitget for stability)
+    /// For 637 assets this creates ~13 parallel connections
+    #[serde(default)]
+    pub symbols_per_connection: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +109,7 @@ impl Default for VendorConfig {
                     stale_check_period_secs: 10,
                     stale_timeout_secs: 30,
                     heartbeat_interval_secs: 30,
+                    symbols_per_connection: Some(50), // Bitget recommends < 50 for stability
                 },
             },
             blockchain: BlockchainConfig {
@@ -127,6 +132,52 @@ impl VendorConfig {
     }
 
     pub fn from_env_and_args() -> Self {
-        Self::default()
+        let mut config = Self::default();
+
+        // Override blockchain config from environment variables (global.env)
+        // RPC URL: TESTNET_RPC or ORBIT_RPC_URL
+        if let Ok(rpc_url) = std::env::var("TESTNET_RPC")
+            .or_else(|_| std::env::var("ORBIT_RPC_URL"))
+        {
+            config.blockchain.rpc_url = rpc_url;
+        }
+
+        // Castle address
+        if let Ok(castle_address) = std::env::var("CASTLE_ADDRESS") {
+            config.blockchain.castle_address = Some(castle_address);
+        }
+
+        // Private key: NEW_VENDOR (preferred), TESTNET_PRIVATE_KEY, or DEPLOY_PRIVATE_KEY
+        if let Ok(mut private_key) = std::env::var("NEW_VENDOR")
+            .or_else(|_| std::env::var("TESTNET_PRIVATE_KEY"))
+            .or_else(|_| std::env::var("DEPLOY_PRIVATE_KEY"))
+        {
+            // Ensure 0x prefix
+            if !private_key.starts_with("0x") {
+                private_key = format!("0x{}", private_key);
+            }
+            config.blockchain.private_key = private_key;
+        }
+
+        // Vendor ID
+        if let Ok(vendor_id) = std::env::var("VENDOR_ID") {
+            if let Ok(id) = vendor_id.parse() {
+                config.blockchain.vendor_id = id;
+            }
+        }
+
+        // Margin config from environment
+        if let Ok(min_order) = std::env::var("MIN_ORDER_SIZE_USD") {
+            if let Ok(v) = min_order.parse() {
+                config.margin.min_order_size_usd = v;
+            }
+        }
+        if let Ok(total_exp) = std::env::var("TOTAL_EXPOSURE_USD") {
+            if let Ok(v) = total_exp.parse() {
+                config.margin.total_exposure_usd = v;
+            }
+        }
+
+        config
     }
 }
