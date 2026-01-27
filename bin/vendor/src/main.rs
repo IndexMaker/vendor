@@ -1,4 +1,5 @@
 use alloy_primitives::Address;
+use asset_registry::AssetRegistry;
 use clap::Parser;
 use config::VendorConfig;
 use eyre::Result;
@@ -8,6 +9,7 @@ use parking_lot::RwLock as AtomicLock;
 use crate::api::{ApiServer, AppState};
 use crate::delta_rebalancer::MarginCalculator;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::{path::PathBuf, sync::Arc};
 use std::time::Duration;
 // unbounded_channel no longer needed with MultiWebSocketSubscriber
@@ -123,6 +125,15 @@ async fn main() -> Result<()> {
     };
         
 
+    // Log blockchain config from environment
+    tracing::info!(
+        "Blockchain config: castle={:?}, rpc={}, vendor_id={}, has_private_key={}",
+        config.blockchain.castle_address,
+        config.blockchain.rpc_url,
+        config.blockchain.vendor_id,
+        !config.blockchain.private_key.is_empty()
+    );
+
     // Access margin config
     let margin_config = config.margin.clone();
     let min_order_size_usd = margin_config.min_order_size_usd;
@@ -130,10 +141,53 @@ async fn main() -> Result<()> {
 
     tracing::info!("Margin config: min_order=${}, total_exposure=${}", min_order_size_usd, total_exposure_usd);
 
-    // Load asset mapper and symbols
-    // Priority: 1) --config-path, 2) bitget-pairs.json (default), 3) CLI symbols, 4) hardcoded defaults
-    let (symbols, asset_mapper_locked) = if let Some(config_path) = &cli.config_path {
-        // Legacy: Load from config directory with assets.json
+    // Story 1-2: Load asset registry from vendor/assets.json (canonical source)
+    // Priority: 1) ASSET_REGISTRY_PATH env var, 2) vendor/assets.json, 3) legacy fallbacks
+    let registry_path = std::env::var("ASSET_REGISTRY_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("vendor/assets.json"));
+
+    let (symbols, asset_mapper_locked) = if registry_path.exists() {
+        tracing::info!("Loading asset registry from: {:?}", registry_path);
+        match AssetRegistry::load_async(Path::new(&registry_path)).await {
+            Ok(registry) => {
+                // Story 1-2: Log asset count with structured JSON logging
+                tracing::info!(
+                    event = "registry_loaded",
+                    asset_count = registry.len(),
+                    service = "vendor",
+                    "Asset registry loaded successfully"
+                );
+
+                // Create AssetMapper from registry for compatibility with existing code
+                let mut asset_mapper = AssetMapper::new();
+                for asset in registry.all() {
+                    asset_mapper.add_mapping(asset.bitget.clone(), asset.id);
+                }
+
+                let asset_mapper = Arc::new(asset_mapper);
+                let asset_mapper_locked = Arc::new(parking_lot::RwLock::new(asset_mapper.as_ref().clone()));
+                let symbols: Vec<String> = registry.all()
+                    .iter()
+                    .map(|a| a.bitget.clone())
+                    .collect();
+
+                tracing::info!("Created AssetMapper with {} assets from registry", symbols.len());
+                (symbols, Some(asset_mapper_locked))
+            }
+            Err(e) => {
+                tracing::error!(
+                    event = "registry_load_failed",
+                    error = %e,
+                    path = %registry_path.display(),
+                    "Failed to load asset registry - startup cannot continue"
+                );
+                return Err(eyre::eyre!("Asset registry load failed: {}", e));
+            }
+        }
+    } else if let Some(config_path) = &cli.config_path {
+        // Legacy fallback: Load from config directory with assets.json
+        tracing::warn!("Asset registry not found at {:?}, falling back to legacy config path", registry_path);
         tracing::info!("Loading configuration from: {}", config_path);
         let asset_path = PathBuf::from(config_path).join("assets.json");
         let asset_mapper_raw = AssetMapper::load_from_file(&asset_path).await?;
@@ -143,12 +197,13 @@ async fn main() -> Result<()> {
         tracing::info!("Loaded {} assets from config", symbols.len());
         (symbols, Some(asset_mapper_locked))
     } else {
-        // Default: Try loading all Bitget pairs from generated file
+        // Legacy fallback: Try loading from bitget-pairs.json
         let bitget_pairs_path = std::env::var("BITGET_PAIRS_FILE")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("vendor/data/bitget-pairs.json"));
 
         if bitget_pairs_path.exists() {
+            tracing::warn!("Asset registry not found, falling back to bitget-pairs.json");
             tracing::info!("Loading all Bitget pairs from: {:?}", bitget_pairs_path);
             match AssetMapper::load_from_bitget_pairs_file(&bitget_pairs_path).await {
                 Ok(asset_mapper_raw) => {
@@ -187,35 +242,41 @@ async fn main() -> Result<()> {
 
     // Create shared wallet provider for both VendorSubmitter and StalenessManager
     // This ensures they use the same provider type P for AppState<P>
-    let shared_provider = if let Some(castle_address) = &config.blockchain.castle_address {
+    // Also capture signer address for VendorSubmitter (provider.get_accounts() queries node, not wallet)
+    let (shared_provider, signer_address) = if let Some(castle_address) = &config.blockchain.castle_address {
         if !config.blockchain.private_key.is_empty() {
             let signer: alloy::signers::local::PrivateKeySigner =
                 config.blockchain.private_key.parse()?;
+            let signer_addr = signer.address();
             let wallet = alloy::network::EthereumWallet::from(signer);
 
-            Some(alloy::providers::ProviderBuilder::new()
+            let provider = alloy::providers::ProviderBuilder::new()
                 .with_gas_estimation()
                 .wallet(wallet)
-                .connect_http(config.blockchain.rpc_url.parse()?))
+                .connect_http(config.blockchain.rpc_url.parse()?);
+
+            tracing::info!("Wallet configured with signer: {}", signer_addr);
+            (Some(provider), Some(signer_addr))
         } else {
             tracing::warn!("No private_key configured - using read-only provider");
-            None
+            (None, None)
         }
     } else {
-        None
+        (None, None)
     };
 
     // Initialize VendorSubmitter (for submitAssets, submitMargin, submitSupply)
     let vendor_submitter = if let Some(ref asset_mapper_arc) = asset_mapper_locked {
         if let Some(castle_address) = &config.blockchain.castle_address {
             // Use private key from config instead of environment variable
-            if let Some(ref provider) = shared_provider {
+            if let (Some(ref provider), Some(signer_addr)) = (&shared_provider, signer_address) {
                 let castle_addr: Address = castle_address.parse()?;
 
                 let submitter = Arc::new(onchain::VendorSubmitter::new(
                     provider.clone(),
                     castle_addr,
                     config.blockchain.vendor_id,
+                    signer_addr,
                 ));
 
                 // Submit assets on startup with IDEMPOTENCY check
@@ -248,7 +309,7 @@ async fn main() -> Result<()> {
 
                     // Only submit if there are new assets
                     let assets_submitted = if !new_asset_ids.is_empty() {
-                        match submitter.submit_assets(new_asset_ids.clone()).await {
+                        match submitter.submit_assets(config.blockchain.vendor_id, new_asset_ids.clone()).await {
                             Ok(_) => {
                                 tracing::info!(
                                     "✓ {} NEW assets submitted to Castle ({} were already on-chain)",
@@ -407,10 +468,11 @@ async fn main() -> Result<()> {
                             tracing::info!("    Solver: a*d2(Delta) + b*d(Delta) + c*Delta = 0");
                             tracing::info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-                            let zero = common::amount::Amount::ZERO;
-                            let supply_long: Vec<common::amount::Amount> = vec![zero; n];
-                            let supply_short: Vec<common::amount::Amount> = vec![zero; n];
-                            tracing::info!("  ✓ Supply vectors: {} long (all 0), {} short (all 0)", n, n);
+                            // Mock inventory: 100.0 per asset (like reference script)
+                            let mock_supply = common::amount::Amount::from_u128_raw(100_000_000_000_000_000_000u128); // 100.0 * 1e18
+                            let supply_long: Vec<common::amount::Amount> = vec![mock_supply; n];
+                            let supply_short: Vec<common::amount::Amount> = vec![mock_supply; n];
+                            tracing::info!("  ✓ Supply vectors: {} long (100.0 each), {} short (100.0 each)", n, n);
                             tracing::info!("");
 
                             // ========================================
@@ -421,13 +483,14 @@ async fn main() -> Result<()> {
                             tracing::info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
                             // Submit margin
-                            match submitter_clone.submit_margin(asset_ids_clone.clone(), margins).await {
+                            match submitter_clone.submit_margin(vendor_id, asset_ids_clone.clone(), margins).await {
                                 Ok(_) => tracing::info!("  ✅ MARGIN vector submitted ({} assets)", n),
                                 Err(e) => tracing::error!("  ❌ Margin submit failed: {:?}", e),
                             }
 
                             // Submit supply
                             match submitter_clone.submit_supply(
+                                vendor_id,
                                 asset_ids_clone.clone(),
                                 supply_long,
                                 supply_short,
@@ -445,6 +508,7 @@ async fn main() -> Result<()> {
                             let liquidities: Vec<common::amount::Amount> = vec![default_liquidity; n];
 
                             match submitter_clone.submit_market_data(
+                                vendor_id,
                                 asset_ids_clone.clone(),
                                 prices,
                                 slopes,
@@ -476,6 +540,254 @@ async fn main() -> Result<()> {
         None
     };
 
+
+    // Story 0-1: On-chain ITP discovery and sync
+    // Vendor is the authority for the asset list. Discover ITPs and only accept
+    // those whose assets are all in the vendor's registered asset list.
+    // Rejected ITPs are logged but ignored - vendor does not operate on them.
+    if let (Some(ref provider), Some(castle_address)) = (&shared_provider, &config.blockchain.castle_address) {
+        let castle_addr: Address = castle_address.parse()?;
+        let sync_service = onchain_sync::OnChainSyncService::new(
+            provider.clone(),
+            castle_addr,
+            config.blockchain.vendor_id,
+        );
+
+        // Build the vendor's known asset ID list from the asset mapper
+        let vendor_asset_ids: Vec<u128> = if let Some(ref asset_mapper_arc) = asset_mapper_locked {
+            let mapper = asset_mapper_arc.read();
+            mapper.get_all_symbols()
+                .iter()
+                .filter_map(|symbol| mapper.get_id(symbol))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // Collateral whitelist: only accept ITPs using known collateral tokens
+        // wUSDC on Orbit is the primary accepted collateral
+        let wusdc_address: Option<Address> = std::env::var("ORBIT_WUSDC_ADDRESS")
+            .ok()
+            .or_else(|| std::env::var("COLLATERAL_ADDRESS").ok())
+            .and_then(|s| s.parse().ok());
+
+        let accepted_collaterals: Option<Vec<Address>> = wusdc_address.map(|addr| vec![addr]);
+
+        match sync_service.discover_accepted_itps(
+            &vendor_asset_ids,
+            accepted_collaterals.as_deref(),
+        ).await {
+            Ok((accepted_itps, rejected_itps)) => {
+                tracing::info!(
+                    event = "itp_discovery_complete",
+                    accepted = accepted_itps.len(),
+                    rejected = rejected_itps.len(),
+                    service = "vendor",
+                    "ITP discovery and validation complete"
+                );
+
+                for itp in &rejected_itps {
+                    tracing::warn!(
+                        event = "itp_rejected",
+                        index_id = itp.index_id,
+                        asset_count = itp.asset_count,
+                        "ITP rejected - unsupported assets or collateral"
+                    );
+                }
+
+                // Story 0-1 AC4: Verify on-chain registration for accepted ITPs.
+                // If assets are missing, auto-register them to fulfill AC4.
+                // The startup pipeline should have already submitted all assets,
+                // but this catches any gaps and ensures ITP operability.
+                for itp in &accepted_itps {
+                    if let Some(ref comp) = itp.composition {
+                        match sync_service.find_missing_assets(comp).await {
+                            Ok(missing) if missing.is_empty() => {
+                                tracing::info!(
+                                    event = "itp_fully_synced",
+                                    index_id = itp.index_id,
+                                    asset_count = itp.asset_count,
+                                    "ITP accepted - all assets registered on-chain"
+                                );
+                            }
+                            Ok(missing) => {
+                                tracing::warn!(
+                                    event = "itp_assets_not_registered",
+                                    index_id = itp.index_id,
+                                    missing_count = missing.len(),
+                                    missing_ids = ?missing,
+                                    "ITP accepted but some assets NOT registered on-chain - attempting auto-registration (AC4)"
+                                );
+
+                                // AC4: Auto-register missing assets
+                                if let Some(ref submitter) = vendor_submitter {
+                                    // Step 1: Submit the missing asset IDs
+                                    match submitter.submit_assets(config.blockchain.vendor_id, missing.clone()).await {
+                                        Ok(_) => {
+                                            tracing::info!(
+                                                event = "itp_assets_auto_registered",
+                                                index_id = itp.index_id,
+                                                asset_count = missing.len(),
+                                                "Auto-registered {} missing assets for ITP",
+                                                missing.len()
+                                            );
+
+                                            // Step 2: Submit market data for the missing assets
+                                            // Use default values - the regular update loop will provide real values
+                                            let n = missing.len();
+                                            let default_price = common::amount::Amount::from_u128_raw(100_000_000_000_000_000_000u128); // $100
+                                            let default_slope = common::amount::Amount::from_u128_raw(1_000_000_000_000_000u128); // 0.001
+                                            let default_liquidity = common::amount::Amount::from_u128_raw(500_000_000_000_000_000u128); // 0.5
+                                            let prices: Vec<common::amount::Amount> = vec![default_price; n];
+                                            let slopes: Vec<common::amount::Amount> = vec![default_slope; n];
+                                            let liquidities: Vec<common::amount::Amount> = vec![default_liquidity; n];
+
+                                            if let Err(e) = submitter.submit_market_data(config.blockchain.vendor_id, missing.clone(), prices, slopes, liquidities).await {
+                                                tracing::warn!(
+                                                    event = "itp_market_data_submit_failed",
+                                                    index_id = itp.index_id,
+                                                    error = %e,
+                                                    "Failed to submit market data for auto-registered assets"
+                                                );
+                                            }
+
+                                            // Step 3: Submit margin for the missing assets
+                                            let per_asset_volley = config.margin.total_exposure_usd / n as f64;
+                                            let margins: Vec<common::amount::Amount> = (0..n)
+                                                .map(|_| {
+                                                    // Default margin based on $100 price
+                                                    let margin = per_asset_volley / 100.0;
+                                                    common::amount::Amount::from_u128_raw((margin * 1e18) as u128)
+                                                })
+                                                .collect();
+
+                                            if let Err(e) = submitter.submit_margin(config.blockchain.vendor_id, missing.clone(), margins).await {
+                                                tracing::warn!(
+                                                    event = "itp_margin_submit_failed",
+                                                    index_id = itp.index_id,
+                                                    error = %e,
+                                                    "Failed to submit margin for auto-registered assets"
+                                                );
+                                            }
+
+                                            // Step 4: Submit supply (zeros for new assets)
+                                            let zero = common::amount::Amount::ZERO;
+                                            let supply_long: Vec<common::amount::Amount> = vec![zero; n];
+                                            let supply_short: Vec<common::amount::Amount> = vec![zero; n];
+
+                                            if let Err(e) = submitter.submit_supply(config.blockchain.vendor_id, missing.clone(), supply_long, supply_short).await {
+                                                tracing::warn!(
+                                                    event = "itp_supply_submit_failed",
+                                                    index_id = itp.index_id,
+                                                    error = %e,
+                                                    "Failed to submit supply for auto-registered assets"
+                                                );
+                                            }
+
+                                            tracing::info!(
+                                                event = "itp_assets_sync_complete",
+                                                index_id = itp.index_id,
+                                                "AC4 complete: Auto-registered and configured {} assets for ITP",
+                                                missing.len()
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                event = "itp_assets_auto_register_failed",
+                                                index_id = itp.index_id,
+                                                error = %e,
+                                                "Failed to auto-register missing assets - ITP may not be fully operational"
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    tracing::error!(
+                                        event = "itp_no_submitter",
+                                        index_id = itp.index_id,
+                                        "Cannot auto-register assets: VendorSubmitter not available"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    event = "itp_sync_check_failed",
+                                    index_id = itp.index_id,
+                                    error = %e,
+                                    "Could not verify on-chain registration for ITP"
+                                );
+                            }
+                        }
+                    } else {
+                        tracing::info!(
+                            event = "itp_accepted",
+                            index_id = itp.index_id,
+                            asset_count = itp.asset_count,
+                            "ITP accepted by vendor (no composition to verify)"
+                        );
+                    }
+                }
+
+                // Auto-vote and update quotes for all accepted ITPs
+                // Reference: vaultworks-bridged-flow.sh Phase 3 steps 3.4 + 3.5
+                if !accepted_itps.is_empty() {
+                    if let Some(ref submitter) = vendor_submitter {
+                        tracing::info!(
+                            "🗳️ Auto-voting and updating quotes for {} accepted ITPs",
+                            accepted_itps.len()
+                        );
+
+                        for itp in &accepted_itps {
+                            // Step 1: Submit vote (required before updateIndexQuote)
+                            match submitter.submit_vote(itp.index_id).await {
+                                Ok(_) => {
+                                    tracing::info!(
+                                        event = "itp_vote_submitted",
+                                        index_id = itp.index_id,
+                                        "Vote submitted for ITP"
+                                    );
+                                }
+                                Err(e) => {
+                                    // May fail if already voted - that's OK
+                                    tracing::warn!(
+                                        event = "itp_vote_failed",
+                                        index_id = itp.index_id,
+                                        error = %e,
+                                        "Vote submission failed (may already be voted)"
+                                    );
+                                }
+                            }
+
+                            // Step 2: Update index quote (vendor_id = index_id for per-ITP vendors)
+                            match submitter.update_index_quote(itp.index_id, itp.index_id).await {
+                                Ok(_) => {
+                                    tracing::info!(
+                                        event = "itp_quote_updated",
+                                        index_id = itp.index_id,
+                                        "Index quote updated for ITP"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        event = "itp_quote_update_failed",
+                                        index_id = itp.index_id,
+                                        error = %e,
+                                        "Index quote update failed - vendor data may not be fully submitted yet"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    event = "itp_discovery_failed",
+                    error = %e,
+                    "ITP discovery failed - vendor will rely on local registry only"
+                );
+            }
+        }
+    }
 
     // Create market data observer
     let observer = Arc::new(AtomicLock::new(MarketDataObserver::new()));
@@ -693,6 +1005,190 @@ async fn main() -> Result<()> {
         None
     };
 
+    // Initialize VaultApprover (auto-approve new vaults to draw from custody buffer)
+    let vault_approver = if let Some(approver_config) = onchain::VaultApproverConfig::from_env() {
+        if approver_config.is_valid() {
+            tracing::info!("🔐 Initializing VaultApprover...");
+            let approver = onchain::VaultApprover::new(approver_config);
+            let cancel_token = approver.cancel_token();
+
+            tokio::spawn({
+                let approver = Arc::clone(&approver);
+                async move {
+                    if let Err(e) = approver.start(None).await {
+                        tracing::error!("VaultApprover error: {:?}", e);
+                    }
+                }
+            });
+
+            Some(cancel_token)
+        } else {
+            tracing::info!("VaultApprover disabled (missing CUSTODY_BUFFER_PRIVATE_KEY or other config)");
+            None
+        }
+    } else {
+        tracing::info!("VaultApprover disabled (config not found in environment)");
+        None
+    };
+
+    // Periodic re-submission loop: refresh market data, margins, supply, and ITP quotes
+    // Matches reference script behavior where vendor continuously provides fresh data
+    if let (Some(ref submitter), Some(ref asset_mapper_arc)) = (&vendor_submitter, &asset_mapper_locked) {
+        let submitter_periodic = submitter.clone();
+        let price_tracker_periodic = price_tracker.clone();
+        let asset_mapper_periodic = asset_mapper_arc.clone();
+        let vendor_id_periodic = config.blockchain.vendor_id;
+        let total_exposure_periodic = config.margin.total_exposure_usd;
+        let castle_address_periodic = config.blockchain.castle_address.clone();
+        let rpc_url_periodic = config.blockchain.rpc_url.clone();
+
+        tokio::spawn(async move {
+            // Wait for initial submission to complete (15s wait + submissions)
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+
+            let refresh_interval = std::env::var("VENDOR_REFRESH_SECS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(60);
+
+            tracing::info!(
+                "🔄 Starting periodic vendor data refresh (every {}s)",
+                refresh_interval
+            );
+
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(refresh_interval)).await;
+
+                // Scope the RwLockReadGuard so it's dropped before any .await
+                let (asset_ids, prices, live_count) = {
+                    let asset_mapper_read = asset_mapper_periodic.read();
+                    let all_symbols = asset_mapper_read.get_all_symbols();
+                    let ids: Vec<u128> = all_symbols
+                        .iter()
+                        .filter_map(|symbol| asset_mapper_read.get_id(symbol))
+                        .collect();
+
+                    if ids.is_empty() {
+                        tracing::warn!("Periodic refresh: no assets to submit");
+                        continue;
+                    }
+
+                    let n = ids.len();
+                    let default_price = common::amount::Amount::from_u128_raw(100_000_000_000_000_000_000u128);
+                    let mut p_vec = Vec::with_capacity(n);
+                    let mut live = 0usize;
+
+                    for asset_id in &ids {
+                        let symbol = asset_mapper_read.get_symbol(*asset_id).cloned();
+                        let price = if let Some(ref sym) = symbol {
+                            if let Some(p) = price_tracker_periodic.get_price(sym) {
+                                live += 1;
+                                p
+                            } else {
+                                default_price
+                            }
+                        } else {
+                            default_price
+                        };
+                        p_vec.push(price);
+                    }
+                    // Guard dropped at end of block
+                    (ids, p_vec, live)
+                };
+
+                let n = asset_ids.len();
+                tracing::info!("🔄 Periodic refresh: recomputing vectors for {} assets", n);
+                tracing::info!("  Prices: {} live, {} fallback", live_count, n - live_count);
+
+                // Recompute margins: M_i = (V_max / n) / P_i
+                let per_asset_volley = total_exposure_periodic / n as f64;
+                let margins: Vec<common::amount::Amount> = prices
+                    .iter()
+                    .map(|p| {
+                        let price_f64 = p.to_u128_raw() as f64 / 1e18;
+                        let margin = if price_f64 > 0.0 {
+                            per_asset_volley / price_f64
+                        } else {
+                            1.0
+                        };
+                        common::amount::Amount::from_u128_raw((margin * 1e18) as u128)
+                    })
+                    .collect();
+
+                // Mock supply (100.0 each)
+                let mock_supply = common::amount::Amount::from_u128_raw(100_000_000_000_000_000_000u128);
+                let supply_long: Vec<common::amount::Amount> = vec![mock_supply; n];
+                let supply_short: Vec<common::amount::Amount> = vec![mock_supply; n];
+
+                // Slopes and liquidity
+                let default_slope = common::amount::Amount::from_u128_raw(1_000_000_000_000_000u128);
+                let default_liquidity = common::amount::Amount::from_u128_raw(500_000_000_000_000_000u128);
+                let slopes: Vec<common::amount::Amount> = vec![default_slope; n];
+                let liquidities: Vec<common::amount::Amount> = vec![default_liquidity; n];
+
+                // Per-ITP vendor submission: each ITP gets its own vendor_id = index_id
+                // with assets submitted in the ITP's exact internal order.
+                // This satisfies the JFLT VIL sequential scan requirement.
+                if let Some(ref castle_addr_str) = castle_address_periodic {
+                    if let Ok(castle_addr) = castle_addr_str.parse::<Address>() {
+                        let read_provider = ProviderBuilder::new()
+                            .connect_http(match rpc_url_periodic.parse() {
+                                Ok(url) => url,
+                                Err(_) => continue,
+                            });
+
+                        let sync_service = onchain_sync::OnChainSyncService::new(
+                            read_provider,
+                            castle_addr,
+                            vendor_id_periodic,
+                        );
+
+                        match sync_service.discover_all_itps().await {
+                            Ok(itps) => {
+                                if !itps.is_empty() {
+                                    tracing::info!("  🔧 Per-ITP vendor refresh for {} ITPs", itps.len());
+
+                                    // Build price lookup from computed prices
+                                    let price_map: std::collections::HashMap<u128, common::amount::Amount> =
+                                        asset_ids.iter().cloned().zip(prices.iter().cloned()).collect();
+                                    let price_lookup = |asset_id: u128| -> Option<common::amount::Amount> {
+                                        price_map.get(&asset_id).copied()
+                                    };
+
+                                    for itp in &itps {
+                                        match submitter_periodic.submit_all_for_itp(
+                                            itp.index_id,
+                                            &price_lookup,
+                                            total_exposure_periodic,
+                                        ).await {
+                                            Ok(_) => {
+                                                tracing::info!(
+                                                    "  ✅ ITP {} vendor refresh complete",
+                                                    itp.index_id
+                                                );
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "  ❌ ITP {} vendor refresh failed: {}",
+                                                    itp.index_id, e
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::debug!("  ITP discovery in refresh loop failed: {}", e);
+                            }
+                        }
+                    }
+                }
+
+                tracing::info!("  ✅ Periodic vendor data refresh complete");
+            }
+        });
+    }
+
     tracing::info!("Vendor running");
     tokio::signal::ctrl_c().await?;
 
@@ -700,6 +1196,9 @@ async fn main() -> Result<()> {
     order_sender_config.stop().await?;
     if let Some(api_cancel) = api_server {
         api_cancel.cancel();
+    }
+    if let Some(approver_cancel) = vault_approver {
+        approver_cancel.cancel();
     }
     tracing::info!("Vendor stopped");
     Ok(())

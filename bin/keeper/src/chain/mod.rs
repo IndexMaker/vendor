@@ -14,6 +14,7 @@ mod errors;
 
 pub use event_types::{
     EventSignatures, VaultEvent, parse_log,
+    BuyOrderEvent, SellOrderEvent,
     // Story 2.8: New event types for lifecycle events
     AcquisitionClaimEvent, DisposalClaimEvent,
 };

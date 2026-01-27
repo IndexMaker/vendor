@@ -1,0 +1,19 @@
+[package]
+name = "onchain-sync"
+version = "0.1.0"
+edition = "2021"
+description = "On-chain synchronization service for ITP discovery and vendor sync"
+
+[dependencies]
+alloy = { workspace = true }
+alloy-primitives = { workspace = true }
+alloy-sol-types = { workspace = true }
+alloy-contract = { workspace = true }
+common = { workspace = true, features = ["vec-u128", "std"] }
+eyre = { workspace = true }
+tokio = { workspace = true }
+tracing = "0.1"
+serde = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }

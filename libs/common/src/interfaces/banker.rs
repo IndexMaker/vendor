@@ -10,6 +10,8 @@ sol! {
 
         function submitMarketData(uint128 vendor_id, bytes calldata asset_names, bytes calldata asset_liquidity, bytes calldata asset_prices, bytes calldata asset_slopes) external;
         
+        function submitVote(uint128 index_id, bytes calldata data) external;
+
         function updateIndexQuote(uint128 vendor_id, uint128 index_id) external;
 
         function updateMultipleIndexQuotes(uint128 vendor_id, uint128[] memory index_ids) external;

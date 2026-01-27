@@ -58,6 +58,12 @@ impl SettlementPayload {
     pub fn total_orders(&self) -> usize {
         self.buy_orders.len() + self.sell_orders.len()
     }
+
+    /// Check if payload is empty (no orders or indices)
+    #[allow(dead_code)] // Used in tests
+    pub fn is_empty(&self) -> bool {
+        self.index_ids.is_empty() && self.buy_orders.is_empty() && self.sell_orders.is_empty()
+    }
 }
 
 /// Result of Castle/Vault settlement (Story 2.6)

@@ -279,6 +279,7 @@ where
         margin_config,
         asset_ids,
         correlation_id.clone(),
+        state.vendor_id,
     ).await;
 
     result.map(Json).map_err(|e| {
@@ -296,6 +297,7 @@ async fn process_assets_impl<P>(
     margin_config: MarginConfig,
     asset_ids: Vec<u128>,
     correlation_id: String,
+    vendor_id: u128,
 ) -> Result<ProcessAssetsResponse, String>
 where
     P: alloy::providers::Provider + Clone + Send + Sync + 'static,
@@ -304,7 +306,7 @@ where
     // This prevents MathUnderflow errors from JUPD instruction in VIL
     tracing::debug!("Ensuring assets are registered [batch_id={}]", correlation_id);
     vendor_submitter
-        .ensure_assets_registered(&asset_ids)
+        .ensure_assets_registered(vendor_id, &asset_ids)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -317,7 +319,7 @@ where
 
     // Step 0.5: Filter to only registered assets (safety net)
     let filtered_asset_ids = vendor_submitter
-        .filter_to_registered(&asset_ids)
+        .filter_to_registered(vendor_id, &asset_ids)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -383,7 +385,7 @@ where
     // Step 5: Submit all three calls concurrently (AC #4, #5)
     tracing::info!("Submitting all data concurrently [batch_id={}]", correlation_id);
     let metrics = vendor_submitter
-        .submit_all_concurrent(&submission_data, Some(correlation_id.clone()))
+        .submit_all_concurrent(state.vendor_id, &submission_data, Some(correlation_id.clone()))
         .await
         .map_err(|e| {
             tracing::error!(
@@ -681,6 +683,7 @@ where
         margin_config,
         asset_ids,
         correlation_id.clone(),
+        state.vendor_id,
     ).await;
 
     let timestamp = std::time::SystemTime::now()
@@ -713,6 +716,89 @@ where
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse { error: error_msg }),
             ))
+        }
+    }
+}
+
+// ============================================================================
+// Story 0-1 AC6: Refresh Index Quote Endpoint
+// ============================================================================
+
+use super::types::{RefreshQuoteRequest, RefreshQuoteResponse};
+
+/// POST /refresh-quote endpoint for Keeper to trigger index quote refresh (AC6)
+///
+/// Called by Keeper when quote is stale (>5 min old) before processing orders.
+/// Triggers IBanker::updateIndexQuote on-chain.
+///
+/// # Request
+/// ```json
+/// { "index_id": 10000, "correlation_id": "batch-123" }
+/// ```
+///
+/// # Response
+/// ```json
+/// { "success": true, "index_id": 10000, "tx_hash": "0x...", "correlation_id": "batch-123" }
+/// ```
+pub async fn refresh_quote<P>(
+    State(state): State<AppState<P>>,
+    Json(request): Json<RefreshQuoteRequest>,
+) -> Result<Json<RefreshQuoteResponse>, (StatusCode, Json<ErrorResponse>)>
+where
+    P: alloy::providers::Provider + Clone + Send + Sync + 'static,
+{
+    let correlation_id = request.correlation_id.clone().unwrap_or_else(|| format!("refresh-{}", request.index_id));
+    tracing::info!(
+        "📥 Refresh quote request [{}]: index_id={}",
+        correlation_id,
+        request.index_id
+    );
+
+    // Check if VendorSubmitter is configured
+    let vendor_submitter = match state.vendor_submitter.clone() {
+        Some(vs) => vs,
+        None => {
+            tracing::warn!("Refresh-quote endpoint not configured [{}]", correlation_id);
+            return Err((
+                StatusCode::NOT_IMPLEMENTED,
+                Json(ErrorResponse {
+                    error: "VendorSubmitter not configured".to_string(),
+                }),
+            ));
+        }
+    };
+
+    // Call updateIndexQuote on-chain
+    // Per-ITP vendor: vendor_id = index_id (JFLT order requirement)
+    match vendor_submitter.update_index_quote(request.index_id, request.index_id).await {
+        Ok(()) => {
+            tracing::info!(
+                "✅ Quote refresh complete [{}]: index_id={}",
+                correlation_id,
+                request.index_id
+            );
+            Ok(Json(RefreshQuoteResponse {
+                success: true,
+                index_id: request.index_id,
+                tx_hash: None, // TODO: capture tx hash from receipt
+                correlation_id: request.correlation_id,
+                error: None,
+            }))
+        }
+        Err(e) => {
+            tracing::error!(
+                "❌ Quote refresh failed [{}]: index_id={}, error={}",
+                correlation_id,
+                request.index_id,
+                e
+            );
+            Ok(Json(RefreshQuoteResponse {
+                success: false,
+                index_id: request.index_id,
+                tx_hash: None,
+                correlation_id: request.correlation_id,
+                error: Some(e.to_string()),
+            }))
         }
     }
 }

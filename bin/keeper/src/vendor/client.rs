@@ -1,6 +1,6 @@
 use super::types::{
     AssetsQuote, HealthResponse, QuoteAssetsRequest, UpdateMarketDataRequest,
-    UpdateMarketDataResponse, VendorError,
+    UpdateMarketDataResponse, VendorError, RefreshQuoteRequest, RefreshQuoteResponse,
 };
 use reqwest::Client;
 use std::time::{Duration, Instant};
@@ -265,6 +265,142 @@ impl VendorClient {
         );
 
         Err(final_error)
+    }
+
+    // =========================================================================
+    // Story 0-1 AC6: Refresh Index Quote
+    // =========================================================================
+
+    /// Refresh index quote via Vendor (AC6)
+    ///
+    /// Called when quote is stale (>5 min) before processing BuyOrder/SellOrder.
+    /// Triggers updateIndexQuote on-chain via Vendor.
+    ///
+    /// # Arguments
+    /// * `index_id` - Index ID to refresh quote for
+    /// * `correlation_id` - Optional correlation ID for tracing
+    ///
+    /// # Returns
+    /// * `Ok(RefreshQuoteResponse)` - On success
+    /// * `Err(VendorError)` - On failure
+    pub async fn refresh_quote(
+        &self,
+        index_id: u128,
+        correlation_id: Option<String>,
+    ) -> Result<RefreshQuoteResponse, VendorError> {
+        let url = format!("{}/refresh-quote", self.base_url);
+        let trace_id = correlation_id.clone().unwrap_or_else(|| format!("refresh-{}", index_id));
+
+        tracing::info!(
+            index_id,
+            correlation_id = %trace_id,
+            "📤 Requesting quote refresh from Vendor"
+        );
+
+        let request = RefreshQuoteRequest {
+            index_id,
+            correlation_id,
+        };
+
+        let mut last_error: Option<VendorError> = None;
+
+        // Retry with backoff
+        for attempt in 1..=self.retry_attempts {
+            match self.try_refresh_quote_request(&url, &request).await {
+                Ok(response) => {
+                    if response.success {
+                        tracing::info!(
+                            index_id,
+                            correlation_id = %trace_id,
+                            "✓ Quote refresh complete"
+                        );
+                    } else {
+                        tracing::warn!(
+                            index_id,
+                            correlation_id = %trace_id,
+                            error = ?response.error,
+                            "Quote refresh returned failure"
+                        );
+                    }
+                    return Ok(response);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        index_id,
+                        correlation_id = %trace_id,
+                        attempt,
+                        error = %e,
+                        "Quote refresh attempt {} failed",
+                        attempt
+                    );
+                    last_error = Some(e);
+
+                    if attempt < self.retry_attempts {
+                        let delay_ms = 500 * (1u64 << (attempt - 1));
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    }
+                }
+            }
+        }
+
+        let final_error = VendorError::RetryExhausted {
+            attempts: self.retry_attempts,
+            last_error: last_error.map(|e| e.to_string()).unwrap_or_else(|| "Unknown".to_string()),
+        };
+
+        tracing::error!(
+            index_id,
+            correlation_id = %trace_id,
+            "❌ All quote refresh attempts failed"
+        );
+
+        Err(final_error)
+    }
+
+    /// Internal helper for single refresh_quote request attempt
+    async fn try_refresh_quote_request(
+        &self,
+        url: &str,
+        request: &RefreshQuoteRequest,
+    ) -> Result<RefreshQuoteResponse, VendorError> {
+        let response = self
+            .client
+            .post(url)
+            .json(request)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    VendorError::Timeout {
+                        url: url.to_string(),
+                        timeout_secs: self.timeout.as_secs(),
+                    }
+                } else {
+                    VendorError::RequestFailed {
+                        url: url.to_string(),
+                        reason: e.to_string(),
+                    }
+                }
+            })?;
+
+        let status = response.status();
+
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Failed to read response body".to_string());
+            return Err(VendorError::NonSuccessStatus {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        let result: RefreshQuoteResponse = response.json().await.map_err(|e| {
+            VendorError::SerdeError(format!("Failed to parse refresh response: {}", e))
+        })?;
+
+        Ok(result)
     }
 
     /// Internal helper for single update_market_data request attempt

@@ -118,6 +118,34 @@ impl From<serde_json::Error> for VendorError {
     }
 }
 
+// =============================================================================
+// Story 0-1 AC6: Refresh Index Quote Types
+// =============================================================================
+
+/// Request to refresh index quote (AC6)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshQuoteRequest {
+    /// Index ID to refresh quote for
+    pub index_id: u128,
+    /// Correlation ID for tracing
+    pub correlation_id: Option<String>,
+}
+
+/// Response from Vendor after refreshing index quote (AC6)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshQuoteResponse {
+    /// Whether the refresh was successful
+    pub success: bool,
+    /// Index ID that was refreshed
+    pub index_id: u128,
+    /// Transaction hash if submitted on-chain
+    pub tx_hash: Option<String>,
+    /// Correlation ID
+    pub correlation_id: Option<String>,
+    /// Error message if failed
+    pub error: Option<String>,
+}
+
 /// Response containing market data for stale assets only
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetsQuote {

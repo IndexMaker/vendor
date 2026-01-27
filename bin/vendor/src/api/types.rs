@@ -174,3 +174,31 @@ pub struct UpdateMarketDataResponse {
     /// Server timestamp (Unix seconds)
     pub timestamp: u64,
 }
+
+// ============================================================================
+// Story 0-1 AC6: Refresh Index Quote Types
+// ============================================================================
+
+/// Request from Keeper to refresh index quote (AC6)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RefreshQuoteRequest {
+    /// Index ID to refresh quote for
+    pub index_id: u128,
+    /// Correlation ID for tracing
+    pub correlation_id: Option<String>,
+}
+
+/// Response to Keeper after refreshing index quote (AC6)
+#[derive(Debug, Clone, Serialize)]
+pub struct RefreshQuoteResponse {
+    /// Whether the refresh was successful
+    pub success: bool,
+    /// Index ID that was refreshed
+    pub index_id: u128,
+    /// Transaction hash if submitted on-chain
+    pub tx_hash: Option<String>,
+    /// Correlation ID
+    pub correlation_id: Option<String>,
+    /// Error message if failed
+    pub error: Option<String>,
+}

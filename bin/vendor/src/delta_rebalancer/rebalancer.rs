@@ -153,7 +153,7 @@ where
     /// Fetch vendor demand from on-chain
     async fn fetch_vendor_demand(&self) -> eyre::Result<VendorDemand> {
         // CHANGED: Now uses real implementation via VendorSubmitter
-        self.vendor_submitter.get_vendor_demand().await
+        self.vendor_submitter.get_vendor_demand(self.config.vendor_id).await
     }
 
     /// Start the rebalance loop
@@ -290,7 +290,7 @@ where
                     );
 
                     match self.vendor_submitter
-                        .submit_supply(asset_ids, supply_long, supply_short)
+                        .submit_supply(self.config.vendor_id, asset_ids, supply_long, supply_short)
                         .await
                     {
                         Ok(_) => {

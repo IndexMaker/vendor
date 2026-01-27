@@ -5,10 +5,11 @@
 #![allow(dead_code)] // Many fields and methods reserved for future integration
 
 use crate::chain::ChainError;
-use alloy::providers::ProviderBuilder;
+use alloy::providers::{Provider, ProviderBuilder};
+use alloy::rpc::types::Filter;
 use alloy::transports::http::reqwest::Url;
 use alloy_primitives::Address;
-use alloy_sol_types::sol;
+use alloy_sol_types::{sol, SolEvent};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -31,9 +32,6 @@ sol! {
         /// Get the vault address for an index
         function getVault(uint128 index_id) external view returns (address);
 
-        /// Get total number of vaults
-        function getVaultCount() external view returns (uint128);
-
         /// Check if a vault exists for an index
         function hasVault(uint128 index_id) external view returns (bool);
 
@@ -43,6 +41,11 @@ sol! {
         /// Get the assets in an index as packed bytes (Story 2.4)
         function getIndexAssets(uint128 index_id) external view returns (bytes memory);
     }
+}
+
+// Guildmaster events emitted through Castle proxy
+sol! {
+    event IndexCreated(uint128 index_id, string name, string symbol, address vault);
 }
 
 /// Cached vault address entry
@@ -272,19 +275,22 @@ impl StewardClient {
         Ok(asset_ids)
     }
 
-    /// Decode asset IDs from Stewart's bytes response (Story 2.4 - Subtask 1.5)
-    /// Stewart returns packed bytes where each 16 bytes is a big-endian u128
+    /// Decode asset IDs from Steward's bytes response (Story 2.4 - Subtask 1.5)
+    /// Steward returns packed bytes where each 16 bytes is a little-endian u128 (Labels format)
     /// Asset IDs are stored as plain values (e.g., 101, 102) not scaled by 10^18
+    ///
+    /// IMPORTANT: Vaultworks uses little-endian encoding for Labels (u128 arrays).
+    /// See vaultworks/libs/common/src/uint.rs - from_le_bytes/to_le_bytes
     fn decode_asset_ids(bytes: &alloy_primitives::Bytes) -> Result<Vec<u128>, ChainError> {
         if bytes.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Raw bytes parsing: 16 bytes per uint128, big endian
+        // Raw bytes parsing: 16 bytes per uint128, little-endian (Vaultworks Labels format)
         let mut assets = Vec::new();
         for chunk in bytes.chunks(16) {
             if chunk.len() == 16 {
-                let value = u128::from_be_bytes(chunk.try_into().unwrap());
+                let value = u128::from_le_bytes(chunk.try_into().unwrap());
                 assets.push(value);
             } else if !chunk.is_empty() {
                 // Partial chunk at end - log warning but continue
@@ -311,41 +317,87 @@ impl StewardClient {
         cache.clear();
     }
 
-    /// Refresh the full vault list from the chain
-    /// Queries getVaultCount() and then getVault() for each index
+    /// Refresh the full vault list by scanning IndexCreated events from the Castle proxy.
+    ///
+    /// Uses event log scanning instead of getVaultCount() enumeration, since
+    /// getVaultCount() doesn't exist on the deployed Castle contract.
     pub async fn refresh_vault_list(&self) -> Result<Vec<Address>, ChainError> {
-        tracing::info!("Refreshing vault list from Stewart contract...");
+        tracing::info!("Refreshing vault list via IndexCreated event scanning...");
 
         let url: Url = self.config.rpc_url.parse().map_err(|_| {
             ChainError::InvalidConfig(format!("Invalid RPC URL: {}", self.config.rpc_url))
         })?;
 
         let provider = ProviderBuilder::new().connect_http(url);
-        let steward = ISteward::new(self.config.steward_address, &provider);
 
-        // Get total vault count - returns u128 directly
-        let vault_count = steward
-            .getVaultCount()
-            .call()
+        let filter = Filter::new()
+            .address(self.config.steward_address)
+            .event_signature(IndexCreated::SIGNATURE_HASH)
+            .from_block(0);
+
+        let logs = provider
+            .get_logs(&filter)
             .await
-            .map_err(|e| ChainError::StewardCallFailed(format!("getVaultCount failed: {}", e)))?;
+            .map_err(|e| {
+                ChainError::StewardCallFailed(format!("Failed to fetch IndexCreated logs: {}", e))
+            })?;
 
-        tracing::info!("Stewart reports {} vaults", vault_count);
+        tracing::info!("Found {} IndexCreated events", logs.len());
 
         let mut discovered_vaults = Vec::new();
 
-        // Query each vault (index IDs are 1-based typically)
-        for index_id in 1..=vault_count {
+        for log in &logs {
+            let decoded = match log.log_decode::<IndexCreated>() {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::debug!("Skipping non-decodable IndexCreated log: {}", e);
+                    continue;
+                }
+            };
+
+            let index_id: u128 = decoded.inner.index_id;
+            let vault_address = decoded.inner.vault;
+            let name = &decoded.inner.name;
+            let symbol = &decoded.inner.symbol;
+
+            tracing::info!(
+                "Found IndexCreated: index_id={}, name={}, symbol={}, vault={}",
+                index_id, name, symbol, vault_address
+            );
+
+            // Cache the vault via existing query path
             match self.query_vault_from_chain(index_id).await {
                 Ok(vault_addr) => {
                     discovered_vaults.push(vault_addr);
                 }
-                Err(ChainError::VaultNotFound { .. }) => {
-                    // Some indices may not have vaults, skip
-                    tracing::debug!("No vault for index {}", index_id);
-                }
                 Err(e) => {
-                    tracing::warn!("Error querying vault for index {}: {:?}", index_id, e);
+                    // Vault address from event is still valid even if getVault fails
+                    tracing::warn!(
+                        "getVault failed for index {} but event has vault {}: {:?}",
+                        index_id, vault_address, e
+                    );
+                    // Use the vault address directly from the event
+                    {
+                        let mut cache = self.vault_cache.write().await;
+                        cache.insert(
+                            index_id,
+                            CacheEntry {
+                                address: vault_address,
+                                cached_at: Instant::now(),
+                            },
+                        );
+                    }
+                    {
+                        let mut known = self.known_vaults.write().await;
+                        if !known.contains(&vault_address) {
+                            known.push(vault_address);
+                            tracing::info!(
+                                "Discovered vault from event: {} for index {}",
+                                vault_address, index_id
+                            );
+                        }
+                    }
+                    discovered_vaults.push(vault_address);
                 }
             }
         }
@@ -525,9 +577,9 @@ mod tests {
 
     #[test]
     fn test_decode_asset_ids_single() {
-        // Single u128 value: 42 in big-endian (16 bytes)
+        // Single u128 value: 42 in little-endian (16 bytes) - Vaultworks Labels format
         let mut bytes_vec = vec![0u8; 16];
-        bytes_vec[15] = 42; // LSB
+        bytes_vec[0] = 42; // LSB in little-endian is first byte
         let bytes = alloy_primitives::Bytes::from(bytes_vec);
 
         let result = StewardClient::decode_asset_ids(&bytes).unwrap();
@@ -536,10 +588,10 @@ mod tests {
 
     #[test]
     fn test_decode_asset_ids_multiple() {
-        // Two u128 values: 1 and 2 in big-endian
+        // Two u128 values: 1 and 2 in little-endian (Vaultworks Labels format)
         let mut bytes_vec = vec![0u8; 32];
-        bytes_vec[15] = 1; // First u128 = 1
-        bytes_vec[31] = 2; // Second u128 = 2
+        bytes_vec[0] = 1;  // First u128 = 1 (LSB first)
+        bytes_vec[16] = 2; // Second u128 = 2 (LSB first)
         let bytes = alloy_primitives::Bytes::from(bytes_vec);
 
         let result = StewardClient::decode_asset_ids(&bytes).unwrap();
@@ -548,16 +600,17 @@ mod tests {
 
     #[test]
     fn test_decode_asset_ids_large_value() {
-        // Test with a larger value to verify big-endian decoding
-        // Value: 0x0102030405060708090A0B0C0D0E0F10
+        // Test with a larger value to verify little-endian decoding
+        // Value: 0x100F0E0D0C0B0A090807060504030201 (little-endian bytes 01 02 03... 10)
         let bytes_vec: Vec<u8> = (1..=16).collect();
         let bytes = alloy_primitives::Bytes::from(bytes_vec);
 
         let result = StewardClient::decode_asset_ids(&bytes).unwrap();
         assert_eq!(result.len(), 1);
 
-        // Expected value: big-endian interpretation of 01 02 03... 10
-        let expected: u128 = 0x0102030405060708090A0B0C0D0E0F10;
+        // Expected value: little-endian interpretation of 01 02 03... 10
+        // LSB=01, next=02, ... MSB=10
+        let expected: u128 = 0x100F0E0D0C0B0A090807060504030201;
         assert_eq!(result[0], expected);
     }
 

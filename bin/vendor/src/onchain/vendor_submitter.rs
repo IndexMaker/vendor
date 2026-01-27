@@ -78,32 +78,70 @@ where
     provider: P,
     castle_address: Address,
     vendor_id: u128,
+    /// Signer address for transaction nonce tracking
+    /// In Alloy, the wallet is a signing layer - get_accounts() queries the node, not the wallet
+    signer_address: Address,
 }
 
 impl<P> VendorSubmitter<P>
 where
     P: Provider + Clone + Send + Sync + 'static,
 {
-    pub fn new(provider: P, castle_address: Address, vendor_id: u128) -> Self {
+    pub fn new(provider: P, castle_address: Address, vendor_id: u128, signer_address: Address) -> Self {
         Self {
             provider,
             castle_address,
             vendor_id,
+            signer_address,
         }
+    }
+
+    /// Get the default vendor_id configured on this submitter
+    pub fn vendor_id(&self) -> u128 {
+        self.vendor_id
+    }
+
+    /// Query on-chain asset order for an ITP via ISteward::getIndexAssets
+    /// Returns asset IDs in the ITP's internal order (critical for JFLT subsequence matching)
+    pub async fn get_itp_asset_order(&self, index_id: u128) -> eyre::Result<Vec<u128>> {
+        tracing::info!("📥 Reading asset order for ITP index_id={}", index_id);
+
+        let call = ISteward::getIndexAssetsCall { index_id };
+
+        let result = self
+            .provider
+            .call(TransactionRequest::default()
+                .to(self.castle_address)
+                .input(call.abi_encode().into()))
+            .await?;
+
+        let decoded = ISteward::getIndexAssetsCall::abi_decode_returns(&result)?;
+        let labels = Labels::from_vec(decoded.to_vec());
+
+        // Labels are stored as raw u128 values (no scaling with ASSET_ID_SCALE=1)
+        let asset_ids: Vec<u128> = labels.data.clone();
+
+        tracing::info!(
+            "  Read {} assets for ITP {} (order: {:?})",
+            asset_ids.len(),
+            index_id,
+            if asset_ids.len() <= 5 { format!("{:?}", &asset_ids) } else { format!("{:?}...", &asset_ids[..5]) }
+        );
+
+        Ok(asset_ids)
     }
 
     /// Get fresh nonce from chain (bypasses provider cache)
     async fn get_fresh_nonce(&self) -> eyre::Result<u64> {
-        // Get signer address from provider
-        let accounts = self.provider.get_accounts().await?;
-        let signer = accounts.first().ok_or_else(|| eyre::eyre!("No signer address"))?;
-        let nonce = self.provider.get_transaction_count(*signer).await?;
+        // Use stored signer address - provider.get_accounts() queries the node, not the local wallet
+        let nonce = self.provider.get_transaction_count(self.signer_address).await?;
         Ok(nonce)
     }
 
     /// Submit tracked assets to Castle (IBanker::submitAssets)
     /// No hardcoded limit - actual limit is gas-based (tested in story 1-9)
-    pub async fn submit_assets(&self, asset_ids: Vec<u128>) -> eyre::Result<()> {
+    /// vendor_id: The vendor account to submit assets for (use index_id for per-ITP vendors)
+    pub async fn submit_assets(&self, vendor_id: u128, asset_ids: Vec<u128>) -> eyre::Result<()> {
         if asset_ids.is_empty() {
             tracing::warn!("No assets to submit");
             return Ok(());
@@ -113,14 +151,14 @@ where
         // Previous 120 limit was arbitrary "Sonia's requirement", not on-chain
         let assets_to_submit = asset_ids;
 
-        tracing::info!("📤 Submitting {} assets to Castle", assets_to_submit.len());
+        tracing::info!("📤 Submitting {} assets to Castle (vendor_id={})", assets_to_submit.len(), vendor_id);
 
         // Scale asset IDs to match on-chain format (multiply by 10^18)
         let scaled_asset_ids = scale_asset_ids(&assets_to_submit);
         let asset_names = Labels::from_vec_u128(scaled_asset_ids);
 
         let call = IBanker::submitAssetsCall {
-            vendor_id: self.vendor_id,
+            vendor_id,
             market_asset_names: asset_names.to_vec().into(),
         };
 
@@ -140,8 +178,10 @@ where
     }
 
     /// Submit margin to Castle (IBanker::submitMargin)
+    /// vendor_id: The vendor account to submit margin for
     pub async fn submit_margin(
         &self,
+        vendor_id: u128,
         asset_ids: Vec<u128>,
         margins: Vec<Amount>,
     ) -> eyre::Result<()> {
@@ -168,7 +208,7 @@ where
         );
 
         let call = IBanker::submitMarginCall {
-            vendor_id: self.vendor_id,
+            vendor_id,
             asset_names: asset_names.to_vec().into(),
             asset_margin: asset_margin.to_vec().into(),
         };
@@ -184,18 +224,21 @@ where
         let receipt = self.provider.send_transaction(tx).await?.get_receipt().await?;
 
         tracing::info!(
-            "  ✓ submitMargin tx: {:?} (block: {}, nonce: {})",
+            "  ✓ submitMargin tx: {:?} (block: {}, nonce: {}, vendor_id={})",
             receipt.transaction_hash,
             receipt.block_number.unwrap_or(0),
-            nonce
+            nonce,
+            vendor_id
         );
 
         Ok(())
     }
 
     /// Submit supply to Castle (IBanker::submitSupply)
+    /// vendor_id: The vendor account to submit supply for
     pub async fn submit_supply(
         &self,
+        vendor_id: u128,
         asset_ids: Vec<u128>,
         supply_long: Vec<Amount>,
         supply_short: Vec<Amount>,
@@ -227,7 +270,7 @@ where
         );
 
         let call = IBanker::submitSupplyCall {
-            vendor_id: self.vendor_id,
+            vendor_id,
             asset_names: asset_names.to_vec().into(),
             asset_quantities_short: supply_short_vec.to_vec().into(),
             asset_quantities_long: supply_long_vec.to_vec().into(),
@@ -244,10 +287,11 @@ where
         let receipt = self.provider.send_transaction(tx).await?.get_receipt().await?;
 
         tracing::info!(
-            "  ✓ submitSupply tx: {:?} (block: {}, nonce: {})",
+            "  ✓ submitSupply tx: {:?} (block: {}, nonce: {}, vendor_id={})",
             receipt.transaction_hash,
             receipt.block_number.unwrap_or(0),
-            nonce
+            nonce,
+            vendor_id
         );
 
         Ok(())
@@ -255,12 +299,12 @@ where
 
     /// Get vendor demand from Castle (IBanker::getVendorDemand)
     /// Returns net demand per asset (demand_long - demand_short)
-    pub async fn get_vendor_demand(&self) -> eyre::Result<VendorDemand> {
-        tracing::info!("📥 Reading vendor demand from Castle...");
+    pub async fn get_vendor_demand(&self, vendor_id: u128) -> eyre::Result<VendorDemand> {
+        tracing::info!("📥 Reading vendor demand from Castle (vendor_id={})...", vendor_id);
 
         // Step 1: Get vendor assets (asset IDs list)
         let assets_call = ISteward::getVendorAssetsCall {
-            vendor_id: self.vendor_id,
+            vendor_id,
         };
 
         let assets_result = self
@@ -280,7 +324,7 @@ where
 
         // Step 2: Get vendor demand (demand_long, demand_short)
         let demand_call = ISteward::getVendorDemandCall {
-            vendor_id: self.vendor_id,
+            vendor_id,
         };
 
         let demand_result = self
@@ -344,6 +388,7 @@ where
     /// Submit market data (P/S/L vectors) to Castle (IBanker::submitMarketData) - AC #6
     ///
     /// # Arguments
+    /// * `vendor_id` - Vendor account ID (use index_id for per-ITP vendors)
     /// * `asset_ids` - Asset IDs (as u128, converted to Labels)
     /// * `prices` - Price (P) vector (micro-prices)
     /// * `slopes` - Slope (S) vector (with fee multiplier applied)
@@ -353,6 +398,7 @@ where
     /// * `Ok(())` on successful transaction
     pub async fn submit_market_data(
         &self,
+        vendor_id: u128,
         asset_ids: Vec<u128>,
         prices: Vec<Amount>,
         slopes: Vec<Amount>,
@@ -393,7 +439,7 @@ where
         );
 
         let call = IBanker::submitMarketDataCall {
-            vendor_id: self.vendor_id,
+            vendor_id,
             asset_names: asset_names.to_vec().into(),
             asset_liquidity: liquidity_vec.to_vec().into(),
             asset_prices: price_vec.to_vec().into(),
@@ -411,10 +457,11 @@ where
         let receipt = self.provider.send_transaction(tx).await?.get_receipt().await?;
 
         tracing::info!(
-            "  ✓ submitMarketData tx: {:?} (block: {}, nonce: {})",
+            "  ✓ submitMarketData tx: {:?} (block: {}, nonce: {}, vendor_id={})",
             receipt.transaction_hash,
             receipt.block_number.unwrap_or(0),
-            nonce
+            nonce,
+            vendor_id
         );
 
         Ok(())
@@ -423,12 +470,15 @@ where
     /// Submit market data from PSLVectors struct (convenience method)
     ///
     /// # Arguments
+    /// * `vendor_id` - Vendor account ID
     /// * `vectors` - Pre-computed PSLVectors from PSLComputeService
     pub async fn submit_market_data_from_vectors(
         &self,
+        vendor_id: u128,
         vectors: &crate::order_book::PSLVectors,
     ) -> eyre::Result<()> {
         self.submit_market_data(
+            vendor_id,
             vectors.asset_ids.clone(),
             vectors.prices.clone(),
             vectors.slopes.clone(),
@@ -454,6 +504,7 @@ where
     /// Target: < 2 seconds total (NFR17)
     pub async fn submit_all_concurrent(
         &self,
+        vendor_id: u128,
         data: &SubmissionData,
         batch_id: Option<String>,
     ) -> eyre::Result<SubmissionMetrics> {
@@ -470,7 +521,7 @@ where
         let margin_fut = async {
             let start = Instant::now();
             let result = self
-                .submit_margin(data.asset_ids.clone(), data.margins.clone())
+                .submit_margin(vendor_id, data.asset_ids.clone(), data.margins.clone())
                 .await;
             (result, start.elapsed())
         };
@@ -479,6 +530,7 @@ where
             let start = Instant::now();
             let result = self
                 .submit_supply(
+                    vendor_id,
                     data.asset_ids.clone(),
                     data.supply_long.clone(),
                     data.supply_short.clone(),
@@ -491,6 +543,7 @@ where
             let start = Instant::now();
             let result = self
                 .submit_market_data(
+                    vendor_id,
                     data.asset_ids.clone(),
                     data.prices.clone(),
                     data.slopes.clone(),
@@ -556,11 +609,11 @@ where
 
     /// Get vendor's registered assets from Castle (ISteward::getVendorAssets)
     /// Returns the set of asset IDs (unscaled, original IDs like 1, 2, 3...)
-    pub async fn get_vendor_assets(&self) -> eyre::Result<std::collections::HashSet<u128>> {
-        tracing::debug!("📥 Reading vendor assets from Castle...");
+    pub async fn get_vendor_assets(&self, vendor_id: u128) -> eyre::Result<std::collections::HashSet<u128>> {
+        tracing::debug!("📥 Reading vendor assets from Castle (vendor_id={})...", vendor_id);
 
         let call = ISteward::getVendorAssetsCall {
-            vendor_id: self.vendor_id,
+            vendor_id,
         };
 
         let result = self
@@ -590,9 +643,9 @@ where
 
     /// Ensure all assets are registered before submission
     /// Registers any missing assets via submitAssets
-    pub async fn ensure_assets_registered(&self, asset_ids: &[u128]) -> eyre::Result<()> {
+    pub async fn ensure_assets_registered(&self, vendor_id: u128, asset_ids: &[u128]) -> eyre::Result<()> {
         // Get currently registered assets
-        let registered = self.get_vendor_assets().await?;
+        let registered = self.get_vendor_assets(vendor_id).await?;
 
         // Find unregistered assets
         let unregistered: Vec<u128> = asset_ids
@@ -602,26 +655,27 @@ where
             .collect();
 
         if unregistered.is_empty() {
-            tracing::debug!("All {} assets already registered", asset_ids.len());
+            tracing::debug!("All {} assets already registered for vendor_id={}", asset_ids.len(), vendor_id);
             return Ok(());
         }
 
         tracing::info!(
-            "📤 Registering {} missing assets (out of {} requested)",
+            "📤 Registering {} missing assets (out of {} requested) for vendor_id={}",
             unregistered.len(),
-            asset_ids.len()
+            asset_ids.len(),
+            vendor_id
         );
 
         // Register missing assets
-        self.submit_assets(unregistered).await?;
+        self.submit_assets(vendor_id, unregistered).await?;
 
         Ok(())
     }
 
     /// Filter asset_ids to only include those registered with the vendor
     /// Returns (filtered_asset_ids, filtered_count)
-    pub async fn filter_to_registered(&self, asset_ids: &[u128]) -> eyre::Result<Vec<u128>> {
-        let registered = self.get_vendor_assets().await?;
+    pub async fn filter_to_registered(&self, vendor_id: u128, asset_ids: &[u128]) -> eyre::Result<Vec<u128>> {
+        let registered = self.get_vendor_assets(vendor_id).await?;
 
         let filtered: Vec<u128> = asset_ids
             .iter()
@@ -641,12 +695,114 @@ where
         Ok(filtered)
     }
 
+    /// Submit vote for an index (IBanker::submitVote)
+    ///
+    /// Required before updateIndexQuote can be called.
+    /// The reference flow calls submitVote(indexId, "0x") after submitAssetWeights.
+    pub async fn submit_vote(&self, index_id: u128) -> eyre::Result<()> {
+        tracing::info!("📤 Submitting vote for index_id={}", index_id);
+
+        let call = IBanker::submitVoteCall {
+            index_id,
+            data: alloy_primitives::Bytes::new(),
+        };
+
+        let nonce = self.get_fresh_nonce().await?;
+
+        let tx = TransactionRequest::default()
+            .to(self.castle_address)
+            .input(call.abi_encode().into())
+            .nonce(nonce);
+
+        let receipt = self.provider.send_transaction(tx).await?.get_receipt().await?;
+
+        tracing::info!(
+            "  ✓ submitVote tx: {:?} (block: {}, nonce: {})",
+            receipt.transaction_hash,
+            receipt.block_number.unwrap_or(0),
+            nonce
+        );
+
+        Ok(())
+    }
+
+    /// Update index quote on-chain (IBanker::updateIndexQuote)
+    ///
+    /// Triggers a recalculation of the index quote for the specified index.
+    /// The vendor must have submitted market data (prices, liquidity, slopes) for all
+    /// assets in the index composition for the quote to be valid.
+    /// vendor_id should be index_id for per-ITP vendor accounts.
+    pub async fn update_index_quote(&self, vendor_id: u128, index_id: u128) -> eyre::Result<()> {
+        tracing::info!("📤 Updating index quote for index_id={} (vendor_id={})", index_id, vendor_id);
+
+        let call = IBanker::updateIndexQuoteCall {
+            vendor_id,
+            index_id,
+        };
+
+        // Fetch fresh nonce from chain
+        let nonce = self.get_fresh_nonce().await?;
+
+        let tx = TransactionRequest::default()
+            .to(self.castle_address)
+            .input(call.abi_encode().into())
+            .nonce(nonce);
+
+        let receipt = self.provider.send_transaction(tx).await?.get_receipt().await?;
+
+        tracing::info!(
+            "  ✓ updateIndexQuote tx: {:?} (block: {}, nonce: {})",
+            receipt.transaction_hash,
+            receipt.block_number.unwrap_or(0),
+            nonce
+        );
+
+        Ok(())
+    }
+
+    /// Update multiple index quotes on-chain (IBanker::updateMultipleIndexQuotes)
+    ///
+    /// Batch version of update_index_quote for efficiency when refreshing multiple ITPs.
+    /// NOTE: This only works if all index_ids share the same vendor_id asset order.
+    /// For per-ITP vendor_ids, use update_index_quote individually.
+    pub async fn update_multiple_index_quotes(&self, vendor_id: u128, index_ids: Vec<u128>) -> eyre::Result<()> {
+        if index_ids.is_empty() {
+            tracing::warn!("No index IDs provided for quote update");
+            return Ok(());
+        }
+
+        tracing::info!("📤 Updating quotes for {} indices (vendor_id={})", index_ids.len(), vendor_id);
+
+        let call = IBanker::updateMultipleIndexQuotesCall {
+            vendor_id,
+            index_ids,
+        };
+
+        // Fetch fresh nonce from chain
+        let nonce = self.get_fresh_nonce().await?;
+
+        let tx = TransactionRequest::default()
+            .to(self.castle_address)
+            .input(call.abi_encode().into())
+            .nonce(nonce);
+
+        let receipt = self.provider.send_transaction(tx).await?.get_receipt().await?;
+
+        tracing::info!(
+            "  ✓ updateMultipleIndexQuotes tx: {:?} (block: {})",
+            receipt.transaction_hash,
+            receipt.block_number.unwrap_or(0)
+        );
+
+        Ok(())
+    }
+
     /// Get vendor supply from Castle (IBanker::getVendorSupply)
-    pub async fn get_vendor_supply(&self) -> eyre::Result<HashMap<u128, (Amount, Amount)>> {
-        tracing::debug!("📥 Reading vendor supply from Castle...");
+    pub async fn get_vendor_supply(&self, vendor_id: u128) -> eyre::Result<HashMap<u128, (Amount, Amount)>> {
+        tracing::debug!("📥 Reading vendor supply from Castle (vendor_id={})...", vendor_id);
 
         let call = ISteward::getVendorSupplyCall {
-            vendor_id: self.vendor_id,
+            vendor_id,
         };
 
         // FIXED: Remove & and pass TransactionRequest by value
@@ -688,6 +844,94 @@ where
         tracing::debug!("  Read supply for {} assets", supply.len());
 
         Ok(supply)
+    }
+
+    /// Full per-ITP vendor setup: query ITP's asset order, submit assets, market data,
+    /// margin, supply, vote, and update quote.
+    ///
+    /// Uses vendor_id = index_id (per-ITP vendor account) to satisfy JFLT's
+    /// sequential scan requirement: vendor assets must be a subsequence matching
+    /// the ITP's internal asset ordering from getIndexAssets.
+    ///
+    /// # Arguments
+    /// * `index_id` - The ITP's index ID (also used as vendor_id)
+    /// * `price_lookup` - Closure to look up price for an asset_id, returns None for default
+    /// * `total_exposure_usd` - Total exposure for margin calculation
+    pub async fn submit_all_for_itp(
+        &self,
+        index_id: u128,
+        price_lookup: &dyn Fn(u128) -> Option<Amount>,
+        total_exposure_usd: f64,
+    ) -> eyre::Result<()> {
+        let vendor_id = index_id; // Per-ITP vendor account
+
+        // Step 1: Get ITP's exact asset order from chain
+        let itp_assets = self.get_itp_asset_order(index_id).await?;
+        if itp_assets.is_empty() {
+            tracing::warn!("ITP {} has no assets, skipping", index_id);
+            return Ok(());
+        }
+
+        let n = itp_assets.len();
+        tracing::info!(
+            "🔧 Setting up per-ITP vendor for index_id={} ({} assets, vendor_id={})",
+            index_id, n, vendor_id
+        );
+
+        // Step 2: Submit assets (creates vendor account if new, or extends if existing)
+        self.submit_assets(vendor_id, itp_assets.clone()).await?;
+
+        // Step 3: Build price, margin, slope, liquidity, supply vectors in ITP order
+        let default_price = Amount::from_u128_raw(100_000_000_000_000_000_000u128); // $100
+        let default_slope = Amount::from_u128_raw(1_000_000_000_000_000u128); // 0.001
+        let default_liquidity = Amount::from_u128_raw(500_000_000_000_000_000u128); // 0.5
+        let mock_supply = Amount::from_u128_raw(100_000_000_000_000_000_000u128); // 100.0
+
+        let per_asset_volley = total_exposure_usd / n as f64;
+
+        let mut prices = Vec::with_capacity(n);
+        let mut margins = Vec::with_capacity(n);
+
+        for &asset_id in &itp_assets {
+            let price = price_lookup(asset_id).unwrap_or(default_price);
+            let price_f64 = price.to_u128_raw() as f64 / 1e18;
+            let margin = if price_f64 > 0.0 {
+                per_asset_volley / price_f64
+            } else {
+                1.0
+            };
+            prices.push(price);
+            margins.push(Amount::from_u128_raw((margin * 1e18) as u128));
+        }
+
+        let slopes: Vec<Amount> = vec![default_slope; n];
+        let liquidities: Vec<Amount> = vec![default_liquidity; n];
+        let supply_long: Vec<Amount> = vec![mock_supply; n];
+        let supply_short: Vec<Amount> = vec![mock_supply; n];
+
+        // Step 4: Submit market data (prices, slopes, liquidity) in ITP order
+        self.submit_market_data(vendor_id, itp_assets.clone(), prices, slopes, liquidities).await?;
+
+        // Step 5: Submit margin in ITP order
+        self.submit_margin(vendor_id, itp_assets.clone(), margins).await?;
+
+        // Step 6: Submit supply in ITP order
+        self.submit_supply(vendor_id, itp_assets, supply_long, supply_short).await?;
+
+        // Step 7: Submit vote (required before updateIndexQuote)
+        if let Err(e) = self.submit_vote(index_id).await {
+            tracing::warn!("Vote for ITP {} failed (may already be voted): {}", index_id, e);
+        }
+
+        // Step 8: Update index quote
+        self.update_index_quote(vendor_id, index_id).await?;
+
+        tracing::info!(
+            "✅ Per-ITP vendor setup complete for index_id={} (vendor_id={})",
+            index_id, vendor_id
+        );
+
+        Ok(())
     }
 }
 

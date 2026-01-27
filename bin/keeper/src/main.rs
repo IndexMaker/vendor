@@ -1,6 +1,8 @@
+use asset_registry::AssetRegistry;
 use clap::Parser;
 use common::amount::Amount;
 use eyre::Result;
+use std::path::Path;
 use std::{path::PathBuf, sync::Arc};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -86,6 +88,41 @@ async fn main() -> Result<()> {
 
     tracing::info!(count = index_mapper.len(), "Loaded indices");
 
+    // Story 1-2: Load asset registry from vendor/assets.json (REQUIRED)
+    let registry_path = std::env::var("ASSET_REGISTRY_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("vendor/assets.json"));
+
+    let asset_registry = if registry_path.exists() {
+        match AssetRegistry::load_async(Path::new(&registry_path)).await {
+            Ok(registry) => {
+                tracing::info!(
+                    event = "registry_loaded",
+                    asset_count = registry.len(),
+                    service = "keeper",
+                    "Asset registry loaded successfully"
+                );
+                Arc::new(registry)
+            }
+            Err(e) => {
+                tracing::error!(
+                    event = "registry_load_failed",
+                    error = %e,
+                    path = %registry_path.display(),
+                    "Failed to load asset registry - startup cannot continue"
+                );
+                return Err(eyre::eyre!("Asset registry load failed: {}", e));
+            }
+        }
+    } else {
+        tracing::error!(
+            event = "registry_not_found",
+            path = %registry_path.display(),
+            "Asset registry file not found - startup cannot continue"
+        );
+        return Err(eyre::eyre!("Asset registry not found at: {}", registry_path.display()));
+    };
+
     // Create vendor client with Story 2.5 update_market_data config
     // Apply environment variable overrides first (Story 2.5)
     let vendor_config = config.vendor.clone().with_env_overrides();
@@ -111,9 +148,35 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Test quote request
+    // Story 1-2: Validate index assets against registry (log warnings for unknown assets)
     let all_assets = index_mapper.get_all_asset_ids();
     if !all_assets.is_empty() {
+        let mut known_count = 0;
+        let mut unknown_assets = Vec::new();
+        for asset_id in &all_assets {
+            if asset_registry.by_id(*asset_id).is_some() {
+                known_count += 1;
+            } else {
+                unknown_assets.push(*asset_id);
+            }
+        }
+        if !unknown_assets.is_empty() {
+            tracing::warn!(
+                event = "unknown_assets_in_indices",
+                unknown_count = unknown_assets.len(),
+                sample_ids = ?unknown_assets.iter().take(5).collect::<Vec<_>>(),
+                "Some index assets not found in registry"
+            );
+        }
+        tracing::info!(
+            event = "asset_validation_complete",
+            total_assets = all_assets.len(),
+            known_in_registry = known_count,
+            unknown = unknown_assets.len(),
+            "Index assets validated against registry"
+        );
+
+        // Test quote request
         match vendor_client.quote_assets(all_assets.clone()).await {
             Ok(quote) => {
                 tracing::debug!(requested = all_assets.len(), stale = quote.len(), "Quote test OK");
@@ -301,11 +364,64 @@ async fn main() -> Result<()> {
         };
         let steward_client = Arc::new(StewardClient::new(steward_config));
 
-        // Register the vault with the steward client so it knows how to look up assets
-        // For now, use the vault_orders address as the default vault for index 10000
-        if let Ok(vault_addr) = config.contracts.vault_orders.parse::<alloy_primitives::Address>() {
-            steward_client.register_vault(10000, vault_addr).await;
-            tracing::info!(vault = %vault_addr, "Registered vault with StewardClient");
+        // Story 0-1: Use OnChainSyncService for dynamic ITP discovery
+        // Only register ITPs whose assets are in the vendor's registry.
+        // Keeper listens blindly to the asset list vendor has submitted.
+        {
+            let castle_addr: alloy_primitives::Address = config.blockchain.castle_address.parse().unwrap_or_default();
+            let read_provider = alloy::providers::ProviderBuilder::new()
+                .connect_http(config.blockchain.rpc_url.parse().unwrap());
+            let sync_service = onchain_sync::OnChainSyncService::new(
+                read_provider,
+                castle_addr,
+                config.blockchain.vendor_id,
+            );
+
+            // Build known asset IDs from registry (same source as vendor)
+            let known_asset_ids: Vec<u128> = asset_registry.all()
+                .iter()
+                .map(|a| a.id)
+                .collect();
+
+            match sync_service.discover_accepted_itps(&known_asset_ids, None).await {
+                Ok((accepted_itps, rejected_itps)) => {
+                    tracing::info!(
+                        event = "itp_discovery_complete",
+                        accepted = accepted_itps.len(),
+                        rejected = rejected_itps.len(),
+                        service = "keeper",
+                        "Discovered and validated ITPs from on-chain"
+                    );
+                    for itp in &rejected_itps {
+                        tracing::warn!(
+                            event = "itp_rejected",
+                            index_id = itp.index_id,
+                            "Skipping ITP with unsupported assets"
+                        );
+                    }
+                    for itp in &accepted_itps {
+                        steward_client.register_vault(itp.index_id, itp.vault_address).await;
+                        tracing::info!(
+                            index_id = itp.index_id,
+                            vault = %itp.vault_address,
+                            assets = itp.asset_count,
+                            "Registered accepted ITP with StewardClient"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        event = "itp_discovery_failed",
+                        error = %e,
+                        "ITP discovery failed, falling back to config vault"
+                    );
+                    // Fallback: register from config
+                    if let Ok(vault_addr) = config.contracts.vault_orders.parse::<alloy_primitives::Address>() {
+                        steward_client.register_vault(10000, vault_addr).await;
+                        tracing::info!(vault = %vault_addr, "Registered config vault with StewardClient");
+                    }
+                }
+            }
         }
 
         let keeper_loop = Arc::new(KeeperLoop::with_asset_extractor(

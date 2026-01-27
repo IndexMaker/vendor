@@ -15,11 +15,13 @@ path = "src/lib.rs"
 alloy-primitives = { workspace = true }
 alloy-sol-types = { workspace = true }
 alloy = {workspace = true}
+asset-registry = { workspace = true, features = ["async"] }
 clap = { workspace = true, features = ["derive"] }
 chrono = { workspace = true }
 common = { workspace = true, features = [
     "vec-u128",
 ]}
+onchain-sync = { workspace = true }
 eyre = { workspace = true }
 ethers = { workspace = true }
 futures = { workspace = true }

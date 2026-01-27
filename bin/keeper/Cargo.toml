@@ -8,11 +8,13 @@ alloy-primitives = { workspace = true }
 alloy-sol-types = { workspace = true }
 alloy = {workspace = true, features = ["contract"]}
 alloy-contract = { workspace = true }
+asset-registry = { workspace = true, features = ["async"] }
 clap = { workspace = true, features = ["derive"] }
 chrono = { workspace = true }
 common = { workspace = true, features = [
     "vec-u128", "vec-u8"
 ]}
+onchain-sync = { workspace = true }
 eyre = { workspace = true }
 ethers = { workspace = true }
 futures = { workspace = true }

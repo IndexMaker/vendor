@@ -1,4 +1,4 @@
-use super::routes::{health, quote_assets, process_assets, update_market_data, AppState};
+use super::routes::{health, quote_assets, process_assets, update_market_data, refresh_quote, AppState};
 use axum::{
     routing::{get, post},
     Router,
@@ -37,6 +37,7 @@ where
             .route("/quote_assets", post(quote_assets::<P>))
             .route("/process-assets", post(process_assets::<P>))
             .route("/update-market-data", post(update_market_data::<P>))
+            .route("/refresh-quote", post(refresh_quote::<P>))  // Story 0-1 AC6
             .with_state(self.state);
         
         tracing::info!("API server listening on {}", self.addr);
